@@ -38,6 +38,7 @@
     "babel-preset-expo": "~54.0.0",
     "jest": "^29.7.0",
     "jest-expo": "~54.0.0",
+    "qrcode": "^1.5.4",
     "typescript": "~5.9.2"
   },
   "scripts": {
@@ -47,7 +48,8 @@
     "ios": "expo start --tunnel --ios",
     "web": "expo start --web",
     "test": "jest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "fixtures": "node scripts/test_fixtures.mjs"
   },
   "jest": {
     "preset": "jest-expo",

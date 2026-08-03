@@ -21,6 +21,9 @@ expo-env.d.ts
 # Metro
 .metro-health-check*
 
+# generated test fixtures
+scripts/fixtures.html
+
 # debug
 npm-debug.*
 yarn-debug.*
