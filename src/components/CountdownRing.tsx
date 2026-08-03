@@ -1,10 +1,20 @@
-import { StyleSheet, Text, View } from 'react-native';
+import { useCallback, useEffect } from 'react';
+import { AppState, StyleSheet, Text, View } from 'react-native';
+import Animated, {
+  Easing,
+  cancelAnimation,
+  useAnimatedProps,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated';
 import Svg, { Circle } from 'react-native-svg';
 
-import { countdownFor, useTick } from '@/otp/clock';
+import { countdownFor, useOtpWindow, useTick } from '@/otp/clock';
 import type { Palette } from '@/theme/palette';
 import { useTheme } from '@/theme/theme_context';
 import { DEFAULT_PERIOD } from '@/vault/types';
+
+const AnimatedCircle = Animated.createAnimatedComponent(Circle);
 
 const SIZE = 34;
 const STROKE = 3;
@@ -34,13 +44,54 @@ function bandColours(secondsRemaining: number, colors: Palette) {
  * remaining inside it, sized to sit inline in the header. It tracks the standard
  * 30-second window; entries on a different cadence carry their own indicator on
  * their row instead.
+ *
+ * The number comes from the shared clock, which ticks a few times a second. The
+ * sweep cannot: at that rate it would visibly step round the circle. Instead it
+ * runs as a single linear animation on the UI thread, re-anchored to the wall
+ * clock whenever the window rolls, so it stays both smooth and honest.
  */
 export function CountdownRing() {
   const { colors } = useTheme();
   const now = useTick();
-  const { secondsRemaining, fractionRemaining } = countdownFor(now, DEFAULT_PERIOD);
+  const otpWindow = useOtpWindow();
+  const { secondsRemaining } = countdownFor(now, DEFAULT_PERIOD);
 
   const { sweep, label } = bandColours(secondsRemaining, colors);
+
+  /** How far through the window the sweep is: 0 at the start, 1 at the end. */
+  const elapsed = useSharedValue(0);
+
+  const sync = useCallback(() => {
+    const { fractionRemaining } = countdownFor(Date.now(), DEFAULT_PERIOD);
+    cancelAnimation(elapsed);
+    // Jump to where the wall clock actually is, then run out the rest of the
+    // window at a constant rate.
+    elapsed.value = 1 - fractionRemaining;
+    elapsed.value = withTiming(1, {
+      duration: fractionRemaining * DEFAULT_PERIOD * 1000,
+      easing: Easing.linear,
+    });
+  }, [elapsed]);
+
+  useEffect(() => {
+    sync();
+  }, [sync, otpWindow]);
+
+  useEffect(() => {
+    // Backgrounded apps get no frames, so the animation is behind on resume.
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') sync();
+    });
+    return () => subscription.remove();
+  }, [sync]);
+
+  useEffect(() => {
+    return () => cancelAnimation(elapsed);
+  }, [elapsed]);
+
+  const animatedProps = useAnimatedProps(() => ({
+    strokeDashoffset: CIRCUMFERENCE * elapsed.value,
+  }));
 
   return (
     <View
@@ -57,7 +108,7 @@ export function CountdownRing() {
           strokeWidth={STROKE}
           fill="none"
         />
-        <Circle
+        <AnimatedCircle
           cx={SIZE / 2}
           cy={SIZE / 2}
           r={RADIUS}
@@ -66,7 +117,7 @@ export function CountdownRing() {
           fill="none"
           strokeLinecap="round"
           strokeDasharray={CIRCUMFERENCE}
-          strokeDashoffset={CIRCUMFERENCE * (1 - fractionRemaining)}
+          animatedProps={animatedProps}
           // Start the sweep at 12 o'clock rather than 3 o'clock.
           transform={`rotate(-90 ${SIZE / 2} ${SIZE / 2})`}
         />
