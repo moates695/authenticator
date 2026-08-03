@@ -13,9 +13,10 @@ WSL environment.
 scanning, manual and pasted `otpauth://` entry, folder management, light/dark
 theming.
 
-**Phase 2 — next.** Zero-knowledge encrypted backup and sync against the
-DigitalOcean droplet. Designed below; nothing built yet. Until it lands, this
-device is the only copy of the codes.
+**Phase 2 — in progress.** Zero-knowledge encrypted backup and sync against the
+DigitalOcean droplet. The server is built and tested (`server/`, see its own
+README); the client key hierarchy, sync engine and onboarding are not started
+yet. Until those land, this device is still the only copy of the codes.
 
 **Phase 3 — after that.** Import from other authenticators (Google
 Authenticator's `otpauth-migration://` protobuf first, then Aegis, 2FAS and
@@ -38,6 +39,10 @@ src/
   vault/vault_store.tsx vault state, CRUD, persistence
   theme/                light and dark palettes
   components/           countdown ring, code row
+server/                 sync service: FastAPI, SQLite, four endpoints
+  app/                  config, schema, hashing, endpoints
+  nginx/                vhost spliced into the droplet's shared template
+  deploy/               the splice script
 ```
 
 ## How codes stay correct and cheap to render

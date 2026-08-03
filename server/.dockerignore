@@ -1,0 +1,13 @@
+.venv/
+data/
+tests/
+nginx/
+deploy/
+.env
+.env.example
+*.db
+*.db-wal
+*.db-shm
+__pycache__/
+.pytest_cache/
+README.md

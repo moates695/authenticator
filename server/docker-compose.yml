@@ -1,0 +1,35 @@
+services:
+  authenticator:
+    build: .
+    image: authenticator-server:latest
+    container_name: authenticator-prod
+    restart: unless-stopped
+    # Nothing in .env is secret — the server holds no key that can open a vault —
+    # but it is kept out of git so each environment can be tuned independently.
+    env_file: .env
+    volumes:
+      - ./data:/data
+    # The droplet runs seven containers on 2GB. A ceiling here means a runaway
+    # request cannot take the other sites down with it.
+    mem_limit: 256m
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health').read()
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # No published ports: nginx-proxy-prod reaches this container by name over the
+    # shared network below, so the service is never exposed directly.
+    networks: [ proxy-net ]
+
+networks:
+  # Created by the gym_junkie_server compose project and already carrying
+  # nginx-proxy-prod and vaultwarden. Declared external so we join it rather than
+  # creating a second network.
+  proxy-net:
+    external: true
+    name: backend-prod_api-network
