@@ -68,7 +68,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   label: {
-    ...StyleSheet.absoluteFill,
+    ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
     justifyContent: 'center',
   },

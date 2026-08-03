@@ -100,7 +100,7 @@ export async function writeVault(vault: Vault): Promise<void> {
 
   const destination = vaultFile();
   if (destination.exists) destination.delete();
-  temp.moveSync(destination);
+  temp.move(destination);
 }
 
 /** True once a vault file exists on disk, i.e. the app has been set up. */

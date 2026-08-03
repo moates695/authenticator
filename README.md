@@ -3,8 +3,9 @@
 A TOTP/HOTP authenticator for Android and iOS. Codes group into folders one level
 deep, and a single countdown at the top of the screen covers every standard code.
 
-Built with Expo SDK 57 / React Native 0.86. Cloud builds via EAS, since iOS
-cannot be built from this WSL environment.
+Built with Expo SDK 54 (pinned to `54.0.23`, matching the gym junkie project) and
+React Native 0.81.5. Cloud builds via EAS, since iOS cannot be built from this
+WSL environment.
 
 ## Status
 
@@ -141,8 +142,9 @@ gesture-handler, reanimated), so Expo Go covers the whole app including camera
 scanning and the keystore. A development build (`eas build --profile
 development`) is only needed once a third-party native module is added.
 
-`npm install` needs `--legacy-peer-deps`: `react-dom` in the dependency tree
-resolves newer than the pinned `react`, which is unrelated to this app's code.
+`expo` is pinned to the exact version `54.0.23` rather than a `~54.0.x` range, so
+`expo start` prints an advisory that it expected a newer patch. That is expected:
+the pin is deliberate, to keep this project on the same SDK build as gym junkie.
 
 ## Notes
 
