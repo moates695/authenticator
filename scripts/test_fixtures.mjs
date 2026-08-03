@@ -18,7 +18,7 @@ import QRCode from 'qrcode';
 import * as OTPAuth from 'otpauth';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const OUTPUT = resolve(HERE, 'fixtures.html');
+export const OUTPUT = resolve(HERE, 'fixtures.html');
 
 // Base32 of the RFC 6238 seeds, matching src/otp/otp.test.ts. Reusing them means
 // a code shown on screen can be checked against the vectors already in the suite.
@@ -176,7 +176,8 @@ function qrWidth(uri) {
   return 230;
 }
 
-async function render() {
+/** Writes the page and returns any fixtures that did not behave as declared. */
+export async function render() {
   const problems = [];
   const cards = [];
 
@@ -299,14 +300,22 @@ ${sections}
   return problems;
 }
 
-const problems = await render();
-const accepted = FIXTURES.filter((f) => f.accepts).length;
+export function fixtureSummary() {
+  const accepted = FIXTURES.filter((f) => f.accepts).length;
+  return `${FIXTURES.length} fixtures (${accepted} valid, ${FIXTURES.length - accepted} refused)`;
+}
 
-console.log(`Wrote ${FIXTURES.length} fixtures (${accepted} valid, ${FIXTURES.length - accepted} refused) to:`);
-console.log(`  ${OUTPUT}`);
+// Only when run directly, so serve_fixtures.mjs can import render() without
+// triggering a write and a process exit.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const problems = await render();
 
-if (problems.length) {
-  console.error('\nFixture problems:');
-  for (const problem of problems) console.error(`  - ${problem}`);
-  process.exit(1);
+  console.log(`Wrote ${fixtureSummary()} to:`);
+  console.log(`  ${OUTPUT}`);
+
+  if (problems.length) {
+    console.error('\nFixture problems:');
+    for (const problem of problems) console.error(`  - ${problem}`);
+    process.exit(1);
+  }
 }

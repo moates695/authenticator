@@ -49,7 +49,8 @@
     "web": "expo start --web",
     "test": "jest",
     "typecheck": "tsc --noEmit",
-    "fixtures": "node scripts/test_fixtures.mjs"
+    "fixtures": "node scripts/test_fixtures.mjs",
+    "fixtures:serve": "node scripts/serve_fixtures.mjs"
   },
   "jest": {
     "preset": "jest-expo",
