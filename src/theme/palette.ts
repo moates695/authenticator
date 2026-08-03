@@ -14,7 +14,10 @@ export type Palette = {
   danger: string;
   warn: string;
   success: string;
-  /** Countdown ring colour once the window is nearly over. */
+  /**
+   * Countdown ring colour for the middle urgency band. The final few seconds use
+   * `danger` instead.
+   */
   expiring: string;
   overlay: string;
 };

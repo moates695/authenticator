@@ -2,6 +2,7 @@ import { StyleSheet, Text, View } from 'react-native';
 import Svg, { Circle } from 'react-native-svg';
 
 import { countdownFor, useTick } from '@/otp/clock';
+import type { Palette } from '@/theme/palette';
 import { useTheme } from '@/theme/theme_context';
 import { DEFAULT_PERIOD } from '@/vault/types';
 
@@ -10,8 +11,23 @@ const STROKE = 3;
 const RADIUS = (SIZE - STROKE) / 2;
 const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
 
-/** Seconds left below which the ring turns amber. */
-const EXPIRING_AT = 5;
+/**
+ * Urgency bands, in seconds remaining. secondsRemaining is a ceiling, so a
+ * displayed "3" means the true remaining time is already under three seconds:
+ * comparing with <= gives exactly three red ticks and seven orange ones.
+ */
+const RED_AT = 3;
+const ORANGE_AT = 10;
+
+/**
+ * Ring colour plus the colour for the number inside it. The number stays neutral
+ * while there is plenty of time left, and picks up the urgency colour after that.
+ */
+function bandColours(secondsRemaining: number, colors: Palette) {
+  if (secondsRemaining <= RED_AT) return { sweep: colors.danger, label: colors.danger };
+  if (secondsRemaining <= ORANGE_AT) return { sweep: colors.expiring, label: colors.expiring };
+  return { sweep: colors.accent, label: colors.text };
+}
 
 /**
  * The single shared countdown for the app: a small ring with the seconds
@@ -24,8 +40,7 @@ export function CountdownRing() {
   const now = useTick();
   const { secondsRemaining, fractionRemaining } = countdownFor(now, DEFAULT_PERIOD);
 
-  const expiring = secondsRemaining <= EXPIRING_AT;
-  const sweep = colors[expiring ? 'expiring' : 'accent'];
+  const { sweep, label } = bandColours(secondsRemaining, colors);
 
   return (
     <View
@@ -57,9 +72,7 @@ export function CountdownRing() {
         />
       </Svg>
       <View style={styles.label} pointerEvents="none">
-        <Text style={[styles.seconds, { color: expiring ? colors.expiring : colors.text }]}>
-          {secondsRemaining}
-        </Text>
+        <Text style={[styles.seconds, { color: label }]}>{secondsRemaining}</Text>
       </View>
     </View>
   );
