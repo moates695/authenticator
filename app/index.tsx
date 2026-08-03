@@ -1,13 +1,16 @@
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Animated,
+  Easing,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { Link, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -17,6 +20,11 @@ import { useTheme } from '@/theme/theme_context';
 import { entryTitle, type Entry } from '@/vault/types';
 import { groupEntries, useVault } from '@/vault/vault_store';
 
+type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
+
+/** How long the add menu takes to open or close. */
+const MENU_DURATION_MS = 160;
+
 export default function HomeScreen() {
   const { colors, spacing, radius } = useTheme();
   const insets = useSafeAreaInsets();
@@ -25,6 +33,32 @@ export default function HomeScreen() {
 
   const groups = useMemo(() => groupEntries(vault), [vault]);
   const isEmpty = vault.entries.length === 0;
+
+  const [menuOpen, setMenuOpen] = useState(false);
+  // Drives the backdrop fade, the menu rise, and the plus-to-cross rotation from
+  // one value, so they cannot drift apart.
+  const menuAnim = useRef(new Animated.Value(0)).current;
+
+  const setMenu = useCallback(
+    (open: boolean) => {
+      setMenuOpen(open);
+      Animated.timing(menuAnim, {
+        toValue: open ? 1 : 0,
+        duration: MENU_DURATION_MS,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }).start();
+    },
+    [menuAnim],
+  );
+
+  const openAdd = useCallback(
+    (mode: 'scan' | 'manual') => {
+      setMenu(false);
+      router.push({ pathname: '/add', params: { mode } });
+    },
+    [router, setMenu],
+  );
 
   const confirmDelete = useCallback(
     (entry: Entry) => {
@@ -55,11 +89,23 @@ export default function HomeScreen() {
 
   return (
     <View style={[styles.screen, { backgroundColor: colors.bg }]}>
-      <View style={[styles.header, { paddingHorizontal: spacing.lg, paddingBottom: spacing.md }]}>
-        <CountdownRing />
-        <View style={styles.headerActions}>
-          <HeaderButton label="Folders" href="/folders" />
-          <HeaderButton label="Settings" href="/settings" />
+      <View
+        style={[
+          styles.header,
+          {
+            paddingTop: insets.top + spacing.sm,
+            paddingHorizontal: spacing.lg,
+            paddingBottom: spacing.md,
+          },
+        ]}
+      >
+        <View style={[styles.headerLeft, { gap: spacing.md }]}>
+          <CountdownRing />
+          <Text style={[styles.title, { color: colors.text }]}>Codes</Text>
+        </View>
+        <View style={[styles.headerActions, { gap: spacing.sm }]}>
+          <IconButton icon="folder-outline" label="Folders" href="/folders" />
+          <IconButton icon="settings-outline" label="Settings" href="/settings" />
         </View>
       </View>
 
@@ -119,44 +165,151 @@ export default function HomeScreen() {
         </ScrollView>
       )}
 
-      <Pressable
-        onPress={() => router.push('/add')}
-        style={({ pressed }) => [
-          styles.fab,
-          {
-            backgroundColor: pressed ? colors.accentSoft : colors.accent,
-            bottom: insets.bottom + spacing.lg,
-            right: spacing.lg,
-          },
+      {/*
+        Dimmer behind the menu. It stays mounted so the fade plays on the way out
+        as well as in, and only takes touches while the menu is actually open.
+      */}
+      <Animated.View
+        style={[
+          StyleSheet.absoluteFillObject,
+          { backgroundColor: colors.overlay, opacity: menuAnim },
         ]}
-        accessibilityRole="button"
-        accessibilityLabel="Add a code"
+        pointerEvents={menuOpen ? 'auto' : 'none'}
       >
-        <Text style={styles.fabIcon}>+</Text>
-      </Pressable>
+        <Pressable
+          style={StyleSheet.absoluteFill}
+          onPress={() => setMenu(false)}
+          accessibilityRole="button"
+          accessibilityLabel="Close add menu"
+        />
+      </Animated.View>
+
+      <View
+        style={[styles.fabCluster, { bottom: insets.bottom + spacing.lg, right: spacing.lg }]}
+        pointerEvents="box-none"
+      >
+        <Animated.View
+          style={[
+            styles.menu,
+            {
+              backgroundColor: colors.surface,
+              borderColor: colors.border,
+              borderRadius: radius.lg,
+              marginBottom: spacing.sm,
+              opacity: menuAnim,
+              transform: [
+                {
+                  translateY: menuAnim.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [10, 0],
+                  }),
+                },
+              ],
+            },
+          ]}
+          pointerEvents={menuOpen ? 'auto' : 'none'}
+        >
+          <MenuItem
+            icon="qr-code-outline"
+            label="Scan QR code"
+            onPress={() => openAdd('scan')}
+          />
+          <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: colors.border }} />
+          <MenuItem
+            icon="create-outline"
+            label="Enter manually"
+            onPress={() => openAdd('manual')}
+          />
+        </Animated.View>
+
+        <Pressable
+          onPress={() => setMenu(!menuOpen)}
+          style={({ pressed }) => [
+            styles.fab,
+            { backgroundColor: pressed ? colors.accentSoft : colors.accent },
+          ]}
+          accessibilityRole="button"
+          accessibilityLabel={menuOpen ? 'Close add menu' : 'Add a code'}
+          accessibilityState={{ expanded: menuOpen }}
+        >
+          <Animated.View
+            style={{
+              transform: [
+                {
+                  rotate: menuAnim.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: ['0deg', '45deg'],
+                  }),
+                },
+              ],
+            }}
+          >
+            <Ionicons name="add" size={30} color="#FFFFFF" />
+          </Animated.View>
+        </Pressable>
+      </View>
     </View>
   );
 }
 
-function HeaderButton({ label, href }: { label: string; href: '/folders' | '/settings' }) {
-  const { colors, spacing, radius } = useTheme();
+/** Header action. Icon-only, so the accessible name comes from the label. */
+function IconButton({
+  icon,
+  label,
+  href,
+}: {
+  icon: IoniconName;
+  label: string;
+  href: '/folders' | '/settings';
+}) {
+  const { colors } = useTheme();
   return (
     <Link href={href} asChild>
       <Pressable
         style={({ pressed }) => [
+          styles.iconButton,
           {
             backgroundColor: pressed ? colors.surfaceAlt : colors.surface,
-            borderRadius: radius.pill,
-            paddingVertical: spacing.sm,
-            paddingHorizontal: spacing.md,
-            borderWidth: StyleSheet.hairlineWidth,
             borderColor: colors.border,
           },
         ]}
+        accessibilityRole="button"
+        accessibilityLabel={label}
       >
-        <Text style={{ color: colors.text, fontSize: 13, fontWeight: '500' }}>{label}</Text>
+        <Ionicons name={icon} size={19} color={colors.text} />
       </Pressable>
     </Link>
+  );
+}
+
+function MenuItem({
+  icon,
+  label,
+  onPress,
+}: {
+  icon: IoniconName;
+  label: string;
+  onPress: () => void;
+}) {
+  const { colors, spacing } = useTheme();
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.menuItem,
+        {
+          backgroundColor: pressed ? colors.surfaceAlt : 'transparent',
+          paddingVertical: spacing.md,
+          paddingHorizontal: spacing.lg,
+          gap: spacing.md,
+        },
+      ]}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+    >
+      <Ionicons name={icon} size={19} color={colors.accent} />
+      <Text style={{ color: colors.text, fontSize: 15, fontWeight: '500' }}>{label}</Text>
+    </Pressable>
   );
 }
 
@@ -181,9 +334,25 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
   },
+  headerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  title: {
+    fontSize: 22,
+    fontWeight: '700',
+    letterSpacing: -0.3,
+  },
   headerActions: {
     flexDirection: 'row',
-    gap: 8,
+  },
+  iconButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: StyleSheet.hairlineWidth,
   },
   banner: {
     borderWidth: StyleSheet.hairlineWidth,
@@ -208,8 +377,25 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 20,
   },
-  fab: {
+  fabCluster: {
     position: 'absolute',
+    alignItems: 'flex-end',
+  },
+  menu: {
+    minWidth: 208,
+    borderWidth: StyleSheet.hairlineWidth,
+    overflow: 'hidden',
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOpacity: 0.22,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+  },
+  menuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  fab: {
     width: 56,
     height: 56,
     borderRadius: 28,
@@ -220,11 +406,5 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.25,
     shadowRadius: 8,
     shadowOffset: { width: 0, height: 3 },
-  },
-  fabIcon: {
-    color: '#FFFFFF',
-    fontSize: 30,
-    lineHeight: 34,
-    fontWeight: '300',
   },
 });

@@ -11,9 +11,10 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { CameraView, useCameraPermissions, type BarcodeScanningResult } from 'expo-camera';
 import * as Clipboard from 'expo-clipboard';
-import { useRouter } from 'expo-router';
+import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 
 import { isValidSecret, normaliseSecret, parseOtpauthUri, type ParsedOtp } from '@/otp/otp';
 import { useTheme } from '@/theme/theme_context';
@@ -68,7 +69,10 @@ export default function AddScreen() {
   const router = useRouter();
   const { vault, addEntry } = useVault();
 
-  const [mode, setMode] = useState<Mode>('scan');
+  // The add menu on the home screen picks the starting mode. A successful scan
+  // then moves to the form, so 'manual' is where every path ends up.
+  const { mode: requestedMode } = useLocalSearchParams<{ mode?: string }>();
+  const [mode, setMode] = useState<Mode>(requestedMode === 'manual' ? 'manual' : 'scan');
   const [form, setForm] = useState<FormState>(BLANK_FORM);
   const [folderId, setFolderId] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -150,16 +154,7 @@ export default function AddScreen() {
       style={[styles.screen, { backgroundColor: colors.bg }]}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      <View style={{ padding: spacing.lg, paddingBottom: spacing.md }}>
-        <SegmentedControl
-          options={[
-            { value: 'scan', label: 'Scan QR' },
-            { value: 'manual', label: 'Enter manually' },
-          ]}
-          value={mode}
-          onChange={setMode}
-        />
-      </View>
+      <Stack.Screen options={{ title: mode === 'scan' ? 'Scan QR code' : 'Enter code' }} />
 
       {notice ? (
         <Pressable
@@ -171,6 +166,7 @@ export default function AddScreen() {
               borderColor: colors.warn,
               borderRadius: radius.md,
               marginHorizontal: spacing.lg,
+              marginTop: spacing.lg,
               padding: spacing.md,
             },
           ]}
@@ -181,10 +177,14 @@ export default function AddScreen() {
       ) : null}
 
       {mode === 'scan' ? (
-        <ScanPane onScanned={acceptUri} onPaste={pasteFromClipboard} />
+        <ScanPane
+          onScanned={acceptUri}
+          onPaste={pasteFromClipboard}
+          onManual={() => setMode('manual')}
+        />
       ) : (
         <ScrollView
-          contentContainerStyle={{ padding: spacing.lg, paddingTop: 0, gap: spacing.lg }}
+          contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }}
           keyboardShouldPersistTaps="handled"
         >
           <Field label="Service" hint="For example, GitHub">
@@ -328,9 +328,11 @@ export default function AddScreen() {
 function ScanPane({
   onScanned,
   onPaste,
+  onManual,
 }: {
   onScanned: (data: string) => void;
   onPaste: () => void;
+  onManual: () => void;
 }) {
   const { colors, spacing, radius } = useTheme();
   const [permission, requestPermission] = useCameraPermissions();
@@ -360,7 +362,7 @@ function ScanPane({
           Camera access is needed to scan QR codes.
         </Text>
         <Text style={{ color: colors.textMuted, fontSize: 13, textAlign: 'center', lineHeight: 19 }}>
-          You can also switch to "Enter manually" and paste an otpauth:// link instead.
+          You can enter the code by hand instead, or paste an otpauth:// link.
         </Text>
         <Pressable
           onPress={() => void requestPermission()}
@@ -374,6 +376,11 @@ function ScanPane({
           ]}
         >
           <Text style={styles.primaryButtonLabel}>Allow camera</Text>
+        </Pressable>
+        <Pressable onPress={onManual} style={{ paddingVertical: spacing.sm }}>
+          <Text style={{ color: colors.accent, fontSize: 15, fontWeight: '500' }}>
+            Enter manually
+          </Text>
         </Pressable>
       </View>
     );
@@ -389,19 +396,43 @@ function ScanPane({
       />
       <View style={styles.scanOverlay} pointerEvents="box-none">
         <View style={[styles.reticle, { borderColor: colors.accent, borderRadius: radius.lg }]} />
-        <Pressable
-          onPress={onPaste}
-          style={({ pressed }) => [
-            styles.pasteButton,
-            { backgroundColor: pressed ? colors.accent : colors.overlay, borderRadius: radius.pill },
-          ]}
-        >
-          <Text style={{ color: '#FFFFFF', fontSize: 14, fontWeight: '500' }}>
-            Paste link instead
-          </Text>
-        </Pressable>
+        <View style={[styles.scanActions, { gap: spacing.sm }]}>
+          <OverlayButton icon="clipboard-outline" label="Paste link" onPress={onPaste} />
+          <OverlayButton icon="create-outline" label="Enter manually" onPress={onManual} />
+        </View>
       </View>
     </View>
+  );
+}
+
+/** A pill that has to stay legible over whatever the camera happens to see. */
+function OverlayButton({
+  icon,
+  label,
+  onPress,
+}: {
+  icon: React.ComponentProps<typeof Ionicons>['name'];
+  label: string;
+  onPress: () => void;
+}) {
+  const { colors, spacing, radius } = useTheme();
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.overlayButton,
+        {
+          backgroundColor: pressed ? colors.accent : 'rgba(0, 0, 0, 0.62)',
+          borderRadius: radius.pill,
+          gap: spacing.sm,
+        },
+      ]}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+    >
+      <Ionicons name={icon} size={16} color="#FFFFFF" />
+      <Text style={{ color: '#FFFFFF', fontSize: 14, fontWeight: '500' }}>{label}</Text>
+    </Pressable>
   );
 }
 
@@ -566,7 +597,6 @@ const styles = StyleSheet.create({
   scanArea: {
     flex: 1,
     margin: 16,
-    marginTop: 0,
     borderRadius: 16,
     overflow: 'hidden',
   },
@@ -581,7 +611,12 @@ const styles = StyleSheet.create({
     aspectRatio: 1,
     borderWidth: 3,
   },
-  pasteButton: {
+  scanActions: {
+    alignItems: 'center',
+  },
+  overlayButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
     paddingVertical: 10,
     paddingHorizontal: 18,
   },

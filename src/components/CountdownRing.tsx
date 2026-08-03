@@ -5,8 +5,8 @@ import { countdownFor, useTick } from '@/otp/clock';
 import { useTheme } from '@/theme/theme_context';
 import { DEFAULT_PERIOD } from '@/vault/types';
 
-const SIZE = 64;
-const STROKE = 5;
+const SIZE = 34;
+const STROKE = 3;
 const RADIUS = (SIZE - STROKE) / 2;
 const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
 
@@ -14,9 +14,10 @@ const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
 const EXPIRING_AT = 5;
 
 /**
- * The single shared countdown for the app, sized for the header. It tracks the
- * standard 30-second window; entries on a different cadence carry their own
- * indicator on their row instead.
+ * The single shared countdown for the app: a small ring with the seconds
+ * remaining inside it, sized to sit inline in the header. It tracks the standard
+ * 30-second window; entries on a different cadence carry their own indicator on
+ * their row instead.
  */
 export function CountdownRing() {
   const { colors } = useTheme();
@@ -27,7 +28,11 @@ export function CountdownRing() {
   const sweep = colors[expiring ? 'expiring' : 'accent'];
 
   return (
-    <View style={styles.container}>
+    <View
+      style={styles.container}
+      accessibilityRole="timer"
+      accessibilityLabel={`${secondsRemaining} seconds until codes refresh`}
+    >
       <Svg width={SIZE} height={SIZE}>
         <Circle
           cx={SIZE / 2}
@@ -73,7 +78,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   seconds: {
-    fontSize: 20,
+    fontSize: 12,
     fontVariant: ['tabular-nums'],
     fontWeight: '600',
   },
