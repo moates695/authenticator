@@ -123,13 +123,23 @@ Vaultwarden is already wired. The box runs seven containers on 2GB with roughly
 ## Development
 
 ```bash
-npm start            # Metro; scan the QR with Expo Go or a dev build
+npm start            # Metro over an ngrok tunnel; scan the QR with Expo Go
+npm run start:lan    # plain LAN mode, for a non-WSL machine
 npm test             # jest, including the RFC 6238 vectors
 npm run typecheck    # tsc --noEmit
 ```
 
-Native modules mean Expo Go will not cover camera scanning or the keystore — use
-a development build (`eas build --profile development`) for those.
+`npm start` uses `--tunnel` because this project is developed from WSL2, where
+Metro binds to a NAT'd virtual adapter that devices on the LAN cannot reach. The
+tunnel routes through ngrok instead, so the phone connects over the internet and
+does not need to share a network with the host. It needs `@expo/ngrok`, which is
+a dev dependency here.
+
+Every native module in this project is either a first-party `expo-*` package or
+one of the libraries Expo Go bundles (svg, screens, safe-area-context,
+gesture-handler, reanimated), so Expo Go covers the whole app including camera
+scanning and the keystore. A development build (`eas build --profile
+development`) is only needed once a third-party native module is added.
 
 `npm install` needs `--legacy-peer-deps`: `react-dom` in the dependency tree
 resolves newer than the pinned `react`, which is unrelated to this app's code.
