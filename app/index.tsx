@@ -103,7 +103,7 @@ export default function HomeScreen() {
           <CountdownRing />
           <Text style={[styles.title, { color: colors.text }]}>Codes</Text>
         </View>
-        <View style={[styles.headerActions, { gap: spacing.sm }]}>
+        <View style={[styles.headerActions, { gap: spacing.md }]}>
           <IconButton icon="folder-outline" label="Folders" href="/folders" />
           <IconButton icon="settings-outline" label="Settings" href="/settings" />
         </View>
