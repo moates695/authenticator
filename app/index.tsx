@@ -224,10 +224,10 @@ export default function HomeScreen() {
 
         <Pressable
           onPress={() => setMenu(!menuOpen)}
-          style={({ pressed }) => [
-            styles.fab,
-            { backgroundColor: pressed ? colors.accentSoft : colors.accent },
-          ]}
+          // No pressed-state tint: the rotation and the menu rising are the
+          // feedback, and dimming the button held the darker colour for the
+          // whole rotation.
+          style={[styles.fab, { backgroundColor: colors.accent }]}
           accessibilityRole="button"
           accessibilityLabel={menuOpen ? 'Close add menu' : 'Add a code'}
           accessibilityState={{ expanded: menuOpen }}
