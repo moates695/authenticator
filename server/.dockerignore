@@ -3,6 +3,9 @@ data/
 tests/
 nginx/
 deploy/
+# Except the one-shot SQLite import, which is run inside the container on the
+# droplet. The rest of deploy/ runs on the host.
+!deploy/migrate_sqlite_to_postgres.py
 .env
 .env.example
 *.db

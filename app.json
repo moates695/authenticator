@@ -26,6 +26,12 @@
       "predictiveBackGestureEnabled": false,
       "blockedPermissions": [
         "android.permission.RECORD_AUDIO"
+      ],
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.USE_BIOMETRIC",
+        "android.permission.USE_FINGERPRINT"
       ]
     },
     "web": {
@@ -46,7 +52,15 @@
         {
           "faceIDPermission": "Authenticator uses Face ID to unlock your codes."
         }
-      ]
-    ]
+      ],
+      "expo-font"
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "ebd4a8c5-c003-440d-9ba7-28353ce09b01"
+      }
+    },
+    "owner": "moates"
   }
 }

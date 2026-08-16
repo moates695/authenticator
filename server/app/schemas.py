@@ -5,11 +5,12 @@ padding, and the server validates only length — the contents are opaque to it.
 
 from __future__ import annotations
 
+import re
 from typing import Annotated, Literal
 
 from pydantic import AfterValidator, BaseModel, EmailStr, Field
 
-from .crypto import AUTH_KEY_BYTES, InvalidBase64, decode_b64
+from .crypto import AUTH_KEY_BYTES, CODE_DIGITS, InvalidBase64, decode_b64
 
 # A wrapped 32-byte data key is a version byte, a 24-byte nonce, 32 bytes of
 # ciphertext and a 16-byte tag. The cap leaves room for the format to change
@@ -38,6 +39,23 @@ WrappedKeyB64 = Annotated[
 CiphertextB64 = Annotated[str, AfterValidator(lambda v: _decoded_length(v))]
 
 
+def _verification_code(value: str) -> str:
+    """
+    Accepts what a person actually types — spaces from a copied code, the dash
+    an email client sometimes inserts on a line break — and normalises it to
+    bare digits before anything compares it.
+    """
+    code = re.sub(r"[\s\-]", "", value)
+    if not re.fullmatch(rf"\d{{{CODE_DIGITS}}}", code):
+        raise ValueError(f"must be {CODE_DIGITS} digits")
+    return code
+
+
+VerificationCode = Annotated[str, AfterValidator(_verification_code)]
+ChallengeId = Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[0-9a-f]+$")]
+Purpose = Literal["register", "login"]
+
+
 class KdfParams(BaseModel):
     """Client-side Argon2id parameters. The server stores these but never runs them."""
 
@@ -52,15 +70,25 @@ class PreloginRequest(BaseModel):
 
 
 class PreloginResponse(BaseModel):
+    """
+    Both derivations' parameters, because a device signing in needs the light one
+    before it can call `/v1/login` and the heavy one after the code comes back.
+    Answered identically for an address with no account, so neither is an oracle.
+    """
+
     kdf: KdfParams
+    auth_kdf: KdfParams
 
 
 class RegisterRequest(BaseModel):
+    """
+    Nothing but the address. The auth key and wrapped keys arrive with the code
+    at `/v1/verify`, so the client can start the slow derivation after this
+    request instead of before it — the Argon2id pass runs while the code is in
+    transit and the user is off reading their inbox.
+    """
+
     email: EmailStr
-    auth_key: AuthKeyB64
-    kdf: KdfParams
-    wrapped_passphrase: WrappedKeyB64
-    wrapped_recovery: WrappedKeyB64
 
 
 class LoginRequest(BaseModel):
@@ -69,7 +97,7 @@ class LoginRequest(BaseModel):
 
 
 class SessionResponse(BaseModel):
-    """Returned by register, which needs no key material echoed back to it."""
+    """Returned by key rotation, which needs no key material echoed back to it."""
 
     user_id: str
     token: str
@@ -77,7 +105,60 @@ class SessionResponse(BaseModel):
     vault_version: int
 
 
+class SessionRefreshResponse(BaseModel):
+    """
+    A session pushed out by another full term. The token is not reissued: it is
+    already in the device's keystore, and rotating it would mean a reply lost on
+    a bad connection cost the user a passphrase and a code to recover from.
+    """
+
+    user_id: str
+    expires_at: int
+
+
+class ChallengeResponse(BaseModel):
+    """
+    What register and login return now. Neither issues a session: the passphrase
+    is the first factor and a code sent to the address on file is the second, so
+    the token comes from `/v1/verify` and nowhere else.
+    """
+
+    challenge_id: str
+    email: EmailStr
+    purpose: Purpose
+    """When the digits in the inbox stop working."""
+    code_expires_at: int
+    """When the challenge itself is gone and the passphrase has to be typed again."""
+    expires_at: int
+
+
+class VerifyRequest(BaseModel):
+    """
+    The material fields belong to registrations, which have no account row until
+    this request lands: the right code plus what the account is made of, in one
+    step. A sign-in's challenge ignores them.
+    """
+
+    challenge_id: ChallengeId
+    code: VerificationCode
+    auth_key: AuthKeyB64 | None = None
+    kdf: KdfParams | None = None
+    auth_kdf: KdfParams | None = None
+    wrapped_passphrase: WrappedKeyB64 | None = None
+    wrapped_recovery: WrappedKeyB64 | None = None
+
+
+class ResendRequest(BaseModel):
+    challenge_id: ChallengeId
+
+
 class LoginResponse(BaseModel):
+    """
+    The answer to a verified challenge, for a registration as much as a sign-in.
+    A device that has just registered already holds these, but one shape for the
+    one endpoint that issues sessions is worth more than the bytes it saves.
+    """
+
     user_id: str
     token: str
     expires_at: int
@@ -115,6 +196,7 @@ class KeysPutRequest(BaseModel):
     current_auth_key: AuthKeyB64
     new_auth_key: AuthKeyB64
     kdf: KdfParams
+    auth_kdf: KdfParams
     wrapped_passphrase: WrappedKeyB64
     wrapped_recovery: WrappedKeyB64
 

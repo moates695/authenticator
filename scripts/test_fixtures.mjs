@@ -181,7 +181,7 @@ export async function render() {
   const problems = [];
   const cards = [];
 
-  for (const fixture of FIXTURES) {
+  for (const [index, fixture] of FIXTURES.entries()) {
     const result = checkFixture(fixture);
     if (fixture.accepts && !result.parses) {
       problems.push(`${fixture.title}: expected to parse but did not (${result.reason})`);
@@ -200,7 +200,7 @@ export async function render() {
     });
 
     cards.push(`
-      <article class="card ${fixture.accepts ? 'ok' : 'reject'}">
+      <article class="card ${fixture.accepts ? 'ok' : 'reject'}" data-index="${index}">
         <header>
           <h3>${escapeHtml(fixture.title)}</h3>
           <span class="badge">${fixture.accepts ? 'should save' : 'should be refused'}</span>
@@ -213,14 +213,42 @@ export async function render() {
   }
 
   const groups = [...new Set(FIXTURES.map((f) => f.group))];
+  const indicesByGroup = (group) =>
+    FIXTURES.map((f, i) => [f, i]).filter(([f]) => f.group === group).map(([, i]) => i);
+
   const sections = groups
     .map((group) => {
-      const inGroup = FIXTURES.map((f, i) => [f, i]).filter(([f]) => f.group === group);
+      const inGroup = indicesByGroup(group);
       return `<section><h2>${escapeHtml(group)}</h2><div class="grid">${inGroup
-        .map(([, i]) => cards[i])
+        .map((i) => cards[i])
         .join('')}</div></section>`;
     })
     .join('');
+
+  // One button per fixture so a single card can be put on screen at a time; a
+  // phone reads a lone QR far more reliably than one in a wall of them.
+  const picker = `<nav class="picker">
+  <div class="picker-row">
+    <button class="pick pick-all" data-target="all" aria-pressed="true">Show all</button>
+    <button class="step" data-step="-1" title="Previous fixture">&larr; Prev</button>
+    <button class="step" data-step="1" title="Next fixture">Next &rarr;</button>
+  </div>
+${groups
+  .map(
+    (group) => `  <div class="picker-row">
+    <span class="picker-label">${escapeHtml(group)}</span>
+${indicesByGroup(group)
+  .map(
+    (i) =>
+      `    <button class="pick ${FIXTURES[i].accepts ? 'ok' : 'reject'}" data-target="${i}" aria-pressed="false">${escapeHtml(
+        FIXTURES[i].title,
+      )}</button>`,
+  )
+  .join('\n')}
+  </div>`,
+  )
+  .join('\n')}
+</nav>`;
 
   const html = `<!doctype html>
 <html lang="en-AU">
@@ -257,6 +285,22 @@ export async function render() {
           background: #FFFFFF; border: 1px solid #C6CCD4; border-radius: 6px; }
   .copy:hover { border-color: #2F6FEB; color: #2F6FEB; }
   .copy.done { border-color: #2F6FEB; color: #2F6FEB; }
+  .picker { position: sticky; top: 0; z-index: 1; margin: 0 -32px 8px; padding: 12px 32px;
+            background: #F4F5F7; border-bottom: 1px solid #DDE1E6; }
+  .picker-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 6px; }
+  .picker-row:last-child { margin-bottom: 0; }
+  .picker-label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+                  color: #55606E; min-width: 15ch; }
+  .pick, .step { font: inherit; font-size: 13px; padding: 5px 11px; cursor: pointer;
+                 background: #FFFFFF; border: 1px solid #C6CCD4; border-radius: 999px; }
+  .pick { border-left-width: 3px; }
+  .pick.ok { border-left-color: #2F6FEB; }
+  .pick.reject { border-left-color: #D4692B; }
+  .pick:hover, .step:hover { border-color: #2F6FEB; color: #2F6FEB; }
+  .pick[aria-pressed="true"] { background: #2F6FEB; border-color: #2F6FEB; color: #FFFFFF; }
+  /* Showing one fixture: the rest are [hidden], so just keep the lone card
+     narrow enough that the QR stays a sensible size. */
+  body.single .grid { grid-template-columns: minmax(0, 420px); }
 </style>
 </head>
 <body>
@@ -266,9 +310,46 @@ export async function render() {
   to reach the phone's clipboard first &mdash; decode the same QR with Google Lens or
   the iOS camera, which offers a copy button, then use <em>Paste link</em> in the app.
   Cards marked <em>should be refused</em> must show a readable notice and save nothing.
+  Pick a fixture below to put it on screen on its own, or step through with the arrow keys.
 </p>
+${picker}
 ${sections}
 <script>
+  // Sorted by data-index so stepping follows the fixture order, not the order
+  // the sections happen to place them in.
+  const cards = [...document.querySelectorAll('.card')]
+    .sort((a, b) => Number(a.dataset.index) - Number(b.dataset.index));
+  const picks = [...document.querySelectorAll('.pick')];
+  let shown = 'all';
+
+  function show(target) {
+    shown = target;
+    document.body.classList.toggle('single', target !== 'all');
+    for (const card of cards) card.hidden = target !== 'all' && card.dataset.index !== String(target);
+    for (const section of document.querySelectorAll('section')) {
+      section.hidden = ![...section.querySelectorAll('.card')].some((card) => !card.hidden);
+    }
+    for (const pick of picks) pick.setAttribute('aria-pressed', String(pick.dataset.target === String(target)));
+    if (target !== 'all') cards[Number(target)].scrollIntoView({ block: 'center' });
+  }
+
+  function step(delta) {
+    if (shown === 'all') return show(delta > 0 ? 0 : cards.length - 1);
+    show((Number(shown) + delta + cards.length) % cards.length);
+  }
+
+  for (const pick of picks) {
+    pick.addEventListener('click', () => show(pick.dataset.target === 'all' ? 'all' : Number(pick.dataset.target)));
+  }
+  for (const button of document.querySelectorAll('.step')) {
+    button.addEventListener('click', () => step(Number(button.dataset.step)));
+  }
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'ArrowRight') step(1);
+    else if (event.key === 'ArrowLeft') step(-1);
+    else if (event.key === 'Escape') show('all');
+  });
+
   document.querySelectorAll('.copy').forEach((button) => {
     button.addEventListener('click', async () => {
       const text = button.dataset.uri;

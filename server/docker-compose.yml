@@ -1,14 +1,24 @@
+# Named explicitly. The default would be taken from the directory, which is just
+# `server` — generic enough to collide with another project on the same host, and
+# a collision here means `docker compose down` reaching containers that are not
+# ours.
+name: authenticator
+
 services:
   authenticator:
     build: .
     image: authenticator-server:latest
     container_name: authenticator-prod
     restart: unless-stopped
-    # Nothing in .env is secret — the server holds no key that can open a vault —
-    # but it is kept out of git so each environment can be tuned independently.
+    # Two secrets now, both in .env and both about reaching the database rather
+    # than opening a vault: POSTGRES_PASSWORD and the same password inside
+    # DATABASE_URL. Neither can decrypt anything — the server holds no key that
+    # can — but they are no longer merely tuning, so .env has to be treated as
+    # something worth protecting.
     env_file: .env
-    volumes:
-      - ./data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
     # The droplet runs seven containers on 2GB. A ceiling here means a runaway
     # request cannot take the other sites down with it.
     mem_limit: 256m
@@ -24,7 +34,39 @@ services:
       start_period: 10s
     # No published ports: nginx-proxy-prod reaches this container by name over the
     # shared network below, so the service is never exposed directly.
-    networks: [ proxy-net ]
+    networks: [ proxy-net, db-net ]
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: authenticator-postgres-prod
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: authenticator
+      POSTGRES_DB: authenticator
+      # From .env, and the same password DATABASE_URL carries.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Tuned down for a small box rather than left at the defaults. This is a
+    # handful of requests per device per day against six tables that fit in
+    # memory several times over; the stock 128MB of shared buffers would be
+    # taken from sites that need it more.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=32MB
+      - -c
+      - max_connections=25
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U authenticator -d authenticator"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    # Not on proxy-net: nothing outside this compose project has any business
+    # reaching the database, and it publishes no ports either.
+    networks: [ db-net ]
 
 networks:
   # Created by the gym_junkie_server compose project and already carrying
@@ -33,3 +75,12 @@ networks:
   proxy-net:
     external: true
     name: backend-prod_api-network
+  # Just the app and its database.
+  db-net:
+    internal: true
+
+volumes:
+  pgdata:
+    # Pinned, so it does not move if the project name ever changes — this is the
+    # one volume on the droplet that must not be lost.
+    name: authenticator-pgdata

@@ -20,6 +20,11 @@ type VaultContextValue = {
   error: string | null;
   addEntry: (parsed: ParsedOtp, folder_id: string | null) => Promise<Entry>;
   updateEntry: (id: string, patch: Partial<Omit<Entry, 'id'>>) => Promise<void>;
+  /**
+   * Reassigns an entry's folder. Separate from `updateEntry` because the entry
+   * also has to be given a place in the destination's ordering.
+   */
+  moveEntry: (id: string, folder_id: string | null) => Promise<void>;
   deleteEntry: (id: string) => Promise<void>;
   advanceCounter: (id: string) => Promise<void>;
   addFolder: (name: string) => Promise<Folder>;
@@ -37,6 +42,33 @@ function tombstone(id: string, kind: Tombstone['kind']): Tombstone {
 
 function nextOrder(items: { order: number }[]): number {
   return items.reduce((max, item) => Math.max(max, item.order), -1) + 1;
+}
+
+/**
+ * Moves an entry into `folder_id`, placing it last in that folder. Exported
+ * separately from the provider so the ordering rule can be tested on its own.
+ *
+ * A move that changes nothing returns the vault untouched, so re-selecting the
+ * folder an entry is already in does not bump its `updated_at` and shuffle it
+ * to the bottom of the list.
+ */
+export function moveEntryToFolder(
+  vault: Vault,
+  id: string,
+  folder_id: string | null,
+): Vault {
+  const entry = vault.entries.find((e) => e.id === id);
+  if (!entry || entry.folder_id === folder_id) return vault;
+
+  const destination = vault.entries.filter((e) => e.folder_id === folder_id);
+  const order = nextOrder(destination);
+
+  return {
+    ...vault,
+    entries: vault.entries.map((e) =>
+      e.id === id ? { ...e, folder_id, order, updated_at: Date.now() } : e,
+    ),
+  };
 }
 
 export function VaultProvider({ children }: { children: ReactNode }) {
@@ -123,6 +155,8 @@ export function VaultProvider({ children }: { children: ReactNode }) {
           ),
         })),
 
+      moveEntry: (id, folder_id) => commit((v) => moveEntryToFolder(v, id, folder_id)),
+
       deleteEntry: (id) =>
         commit((v) => ({
           ...v,
@@ -191,12 +225,16 @@ export type EntryGroup = {
 export function groupEntries(vault: Vault): EntryGroup[] {
   const byOrder = <T extends { order: number }>(a: T, b: T) => a.order - b.order;
 
+  const folderIds = new Set(vault.folders.map((f) => f.id));
+
   const groups: EntryGroup[] = [...vault.folders].sort(byOrder).map((folder) => ({
     folder,
     entries: vault.entries.filter((e) => e.folder_id === folder.id).sort(byOrder),
   }));
 
-  const unfiled = vault.entries.filter((e) => e.folder_id === null).sort(byOrder);
+  const unfiled = vault.entries
+    .filter((e) => e.folder_id === null || !folderIds.has(e.folder_id))
+    .sort(byOrder);
   if (unfiled.length > 0) groups.push({ folder: null, entries: unfiled });
 
   return groups;

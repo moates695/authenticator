@@ -126,11 +126,14 @@ export function generateCode(entry: Entry, timestamp: number): string {
   }).generate({ timestamp });
 }
 
-/** Groups digits into readable halves, e.g. `123456` -> `123 456`. */
+/**
+ * Groups digits into threes, e.g. `123456` -> `123 456`. Reading a code off the
+ * screen a group at a time is what the spacing is for, and three is about as
+ * much as fits in one glance, so longer codes keep the same rhythm rather than
+ * splitting down the middle: `12345678` -> `123 456 78`.
+ */
 export function formatCode(code: string): string {
-  if (code.length <= 4) return code;
-  const mid = Math.ceil(code.length / 2);
-  return `${code.slice(0, mid)} ${code.slice(mid)}`;
+  return code.replace(/(.{3})(?=.)/g, '$1 ');
 }
 
 export function newId(): string {

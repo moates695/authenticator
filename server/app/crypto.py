@@ -1,12 +1,15 @@
 """
 The only cryptography the server does. It never holds a key that can open a
-vault: the auth key it verifies is one half of an HKDF split, and the other half
-— the one that unwraps the data key — never leaves the device.
+vault: the auth key it verifies comes from its own derivation, and the one that
+unwraps the data key never leaves the device.
 
-The auth key arrives as 32 bytes of Argon2id output, so it is already
-high-entropy and does not need another expensive KDF pass to resist guessing.
-scrypt at modest parameters is defence in depth against a database leak, and
-comes from the standard library rather than a compiled dependency.
+The auth key arrives as 32 bytes of Argon2id output, but from a deliberately
+light pass — the client runs it before `/v1/login` so a code is only sent once
+the passphrase is known to be right, and the heavy pass that produces the
+encryption key happens after the code comes back. That makes the scrypt below
+most of what a passphrase guess costs an attacker holding this database, rather
+than a second lock behind an already expensive one, which is why its parameters
+are set well above where defence in depth would have left them.
 """
 
 from __future__ import annotations
@@ -20,7 +23,15 @@ import secrets
 AUTH_KEY_BYTES = 32
 TOKEN_BYTES = 32
 
-SCRYPT_N = 2**14
+# Six digits is what people will retype off a phone screen without resenting it.
+# A million possibilities is not much on its own, which is why the code is only
+# ever the second factor, lives five minutes, and dies after a few wrong guesses.
+CODE_DIGITS = 6
+
+# 64MiB and a couple of hundred milliseconds per verification. The digest is
+# self-describing, so raising these again later leaves existing hashes verifying
+# on the parameters they were made with.
+SCRYPT_N = 2**16
 SCRYPT_R = 8
 SCRYPT_P = 1
 SCRYPT_SALT_BYTES = 16
@@ -80,9 +91,13 @@ def _scrypt(
     p: int = SCRYPT_P,
     dklen: int = SCRYPT_DK_BYTES,
 ) -> bytes:
-    # maxmem has to be raised explicitly: OpenSSL's default 32MiB ceiling is
-    # below what n=2**14, r=8 needs on some builds.
-    return hashlib.scrypt(auth_key, salt=salt, n=n, r=r, p=p, dklen=dklen, maxmem=64 * 1024 * 1024)
+    # maxmem has to be raised explicitly: OpenSSL's default 32MiB ceiling is far
+    # below the 128 * n * r bytes n=2**16, r=8 needs. Sized for the parameters a
+    # stored digest may name rather than for the current ones, so verifying an
+    # old hash cannot fail on a limit set for a newer one.
+    return hashlib.scrypt(
+        auth_key, salt=salt, n=n, r=r, p=p, dklen=dklen, maxmem=256 * 1024 * 1024
+    )
 
 
 def new_session_token() -> tuple[str, str]:
@@ -93,3 +108,23 @@ def new_session_token() -> tuple[str, str]:
 
 def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def new_verification_code() -> str:
+    """Uniform over every six-digit string, leading zeros included."""
+    return f"{secrets.randbelow(10**CODE_DIGITS):0{CODE_DIGITS}d}"
+
+
+def hash_code(code: str) -> str:
+    """
+    A plain digest, not scrypt. Six digits fall to a dictionary of a million
+    entries whatever the parameters, so this is not what stops an attacker who
+    has the database — the attempt cap and the five minute life are. What it
+    does buy is that a backup, a log line or a stray query result does not hand
+    over a live code in the clear.
+    """
+    return hashlib.sha256(code.encode("utf-8")).hexdigest()
+
+
+def code_matches(code: str, encoded: str) -> bool:
+    return hmac.compare_digest(hash_code(code), encoded)

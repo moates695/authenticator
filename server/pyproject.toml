@@ -7,6 +7,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "pydantic[email]>=2.9",
+    "psycopg[binary,pool]>=3.2",
 ]
 
 [dependency-groups]

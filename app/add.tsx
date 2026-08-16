@@ -8,7 +8,6 @@ import {
   StyleSheet,
   Switch,
   Text,
-  TextInput,
   View,
 } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
@@ -16,8 +15,10 @@ import { CameraView, useCameraPermissions, type BarcodeScanningResult } from 'ex
 import * as Clipboard from 'expo-clipboard';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 
+import { Field, FolderPicker, Input, SecretInput, SegmentedControl } from '@/components/form';
 import { isValidSecret, normaliseSecret, parseOtpauthUri, type ParsedOtp } from '@/otp/otp';
 import { useTheme } from '@/theme/theme_context';
+import { useFolderSelection } from '@/vault/folder_selection';
 import {
   DEFAULT_ALGORITHM,
   DEFAULT_DIGITS,
@@ -67,14 +68,14 @@ function formFromParsed(parsed: ParsedOtp): FormState {
 export default function AddScreen() {
   const { colors, spacing, radius } = useTheme();
   const router = useRouter();
-  const { vault, addEntry } = useVault();
+  const { addEntry } = useVault();
 
   // The add menu on the home screen picks the starting mode. A successful scan
   // then moves to the form, so 'manual' is where every path ends up.
   const { mode: requestedMode } = useLocalSearchParams<{ mode?: string }>();
   const [mode, setMode] = useState<Mode>(requestedMode === 'manual' ? 'manual' : 'scan');
   const [form, setForm] = useState<FormState>(BLANK_FORM);
-  const [folderId, setFolderId] = useState<string | null>(null);
+  const { pickerProps: folderPickerProps, saveWithFolder } = useFolderSelection(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -128,18 +129,22 @@ export default function AddScreen() {
 
     setSaving(true);
     try {
-      await addEntry(
-        {
-          issuer: form.issuer.trim(),
-          account: form.account.trim(),
-          secret,
-          type: form.type,
-          algorithm: form.algorithm,
-          digits: Number.isFinite(digits) && digits >= 6 && digits <= 10 ? digits : DEFAULT_DIGITS,
-          period: Number.isFinite(period) && period > 0 ? period : DEFAULT_PERIOD,
-          counter: Number.isFinite(counter) && counter >= 0 ? counter : 0,
-        },
-        folderId,
+      // The pending folder only becomes real now, and only if the code is
+      // actually being filed into it.
+      await saveWithFolder((folder_id) =>
+        addEntry(
+          {
+            issuer: form.issuer.trim(),
+            account: form.account.trim(),
+            secret,
+            type: form.type,
+            algorithm: form.algorithm,
+            digits: Number.isFinite(digits) && digits >= 6 && digits <= 10 ? digits : DEFAULT_DIGITS,
+            period: Number.isFinite(period) && period > 0 ? period : DEFAULT_PERIOD,
+            counter: Number.isFinite(counter) && counter >= 0 ? counter : 0,
+          },
+          folder_id,
+        ),
       );
       router.back();
     } catch (err) {
@@ -187,7 +192,7 @@ export default function AddScreen() {
           contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }}
           keyboardShouldPersistTaps="handled"
         >
-          <Field label="Service" hint="For example, GitHub">
+          <Field label="Name" hint="For example, GitHub">
             <Input
               value={form.issuer}
               onChangeText={(v) => set('issuer', v)}
@@ -207,22 +212,16 @@ export default function AddScreen() {
           </Field>
 
           <Field label="Secret key" hint="The base32 key from the service">
-            <Input
+            <SecretInput
               value={form.secret}
               onChangeText={(v) => set('secret', v)}
               placeholder="JBSWY3DPEHPK3PXP"
               autoCapitalize="characters"
-              autoCorrect={false}
-              monospace
             />
           </Field>
 
           <Field label="Folder">
-            <FolderPicker
-              folders={vault.folders}
-              selected={folderId}
-              onSelect={setFolderId}
-            />
+            <FolderPicker {...folderPickerProps} />
           </Field>
 
           <View style={styles.advancedToggle}>
@@ -318,6 +317,23 @@ export default function AddScreen() {
             ) : (
               <Text style={styles.primaryButtonLabel}>Save code</Text>
             )}
+          </Pressable>
+
+          <Pressable
+            onPress={() => router.back()}
+            disabled={saving}
+            style={({ pressed }) => [
+              styles.secondaryButton,
+              {
+                backgroundColor: pressed ? colors.surfaceAlt : 'transparent',
+                borderColor: colors.border,
+                borderRadius: radius.md,
+              },
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel="Cancel"
+          >
+            <Text style={{ color: colors.textMuted, fontSize: 16, fontWeight: '500' }}>Cancel</Text>
           </Pressable>
         </ScrollView>
       )}
@@ -436,146 +452,6 @@ function OverlayButton({
   );
 }
 
-function FolderPicker({
-  folders,
-  selected,
-  onSelect,
-}: {
-  folders: { id: string; name: string }[];
-  selected: string | null;
-  onSelect: (id: string | null) => void;
-}) {
-  const { colors, spacing, radius } = useTheme();
-  const options: { id: string | null; name: string }[] = [
-    { id: null, name: 'Ungrouped' },
-    ...folders.map((f) => ({ id: f.id as string | null, name: f.name })),
-  ];
-
-  return (
-    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm }}>
-      {options.map((option) => {
-        const active = option.id === selected;
-        return (
-          <Pressable
-            key={option.id ?? 'ungrouped'}
-            onPress={() => onSelect(option.id)}
-            style={{
-              backgroundColor: active ? colors.accent : colors.surface,
-              borderColor: active ? colors.accent : colors.border,
-              borderWidth: StyleSheet.hairlineWidth,
-              borderRadius: radius.pill,
-              paddingVertical: spacing.sm,
-              paddingHorizontal: spacing.md,
-            }}
-          >
-            <Text
-              style={{
-                color: active ? '#FFFFFF' : colors.text,
-                fontSize: 13,
-                fontWeight: active ? '600' : '400',
-              }}
-            >
-              {option.name}
-            </Text>
-          </Pressable>
-        );
-      })}
-    </View>
-  );
-}
-
-function SegmentedControl<T extends string>({
-  options,
-  value,
-  onChange,
-}: {
-  options: { value: T; label: string }[];
-  value: T;
-  onChange: (value: T) => void;
-}) {
-  const { colors, spacing, radius } = useTheme();
-  return (
-    <View
-      style={{
-        flexDirection: 'row',
-        backgroundColor: colors.surfaceAlt,
-        borderRadius: radius.md,
-        padding: 3,
-      }}
-    >
-      {options.map((option) => {
-        const active = option.value === value;
-        return (
-          <Pressable
-            key={option.value}
-            onPress={() => onChange(option.value)}
-            style={{
-              flex: 1,
-              alignItems: 'center',
-              paddingVertical: spacing.sm,
-              borderRadius: radius.sm,
-              backgroundColor: active ? colors.surface : 'transparent',
-            }}
-          >
-            <Text
-              style={{
-                color: active ? colors.text : colors.textMuted,
-                fontSize: 13,
-                fontWeight: active ? '600' : '400',
-              }}
-            >
-              {option.label}
-            </Text>
-          </Pressable>
-        );
-      })}
-    </View>
-  );
-}
-
-function Field({
-  label,
-  hint,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  children: React.ReactNode;
-}) {
-  const { colors, spacing } = useTheme();
-  return (
-    <View style={{ gap: spacing.sm }}>
-      <Text style={{ color: colors.text, fontSize: 13, fontWeight: '600' }}>{label}</Text>
-      {children}
-      {hint ? <Text style={{ color: colors.textFaint, fontSize: 12 }}>{hint}</Text> : null}
-    </View>
-  );
-}
-
-function Input({
-  monospace,
-  ...props
-}: React.ComponentProps<typeof TextInput> & { monospace?: boolean }) {
-  const { colors, spacing, radius } = useTheme();
-  return (
-    <TextInput
-      {...props}
-      placeholderTextColor={colors.textFaint}
-      style={{
-        backgroundColor: colors.surface,
-        borderColor: colors.border,
-        borderWidth: StyleSheet.hairlineWidth,
-        borderRadius: radius.md,
-        paddingVertical: spacing.md,
-        paddingHorizontal: spacing.md,
-        color: colors.text,
-        fontSize: 15,
-        fontFamily: monospace ? (Platform.OS === 'ios' ? 'Menlo' : 'monospace') : undefined,
-      }}
-    />
-  );
-}
-
 const styles = StyleSheet.create({
   screen: {
     flex: 1,
@@ -629,5 +505,11 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 16,
     fontWeight: '600',
+  },
+  secondaryButton: {
+    paddingVertical: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: StyleSheet.hairlineWidth,
   },
 });

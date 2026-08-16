@@ -82,7 +82,7 @@ describe('vault decryption failures', () => {
   it('rejects an unknown format version', () => {
     const blob = encryptVault(sampleVault(), KEY);
     blob[0] = 99;
-    expect(() => decryptVault(blob, KEY)).toThrow(/unsupported vault format version 99/i);
+    expect(() => decryptVault(blob, KEY)).toThrow(/unsupported encrypted format version 99/i);
   });
 
   it('rejects a truncated blob', () => {
