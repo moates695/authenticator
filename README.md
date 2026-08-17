@@ -389,6 +389,39 @@ Signing credentials are EAS-managed and generated on the first Android build.
 Keep them: the Play Store will not accept an upload signed by a different key,
 and losing the keystore for a published app is unrecoverable.
 
+### Icons
+
+Everything in `assets/` except the source is generated:
+
+```bash
+python3 scripts/make_icons.py
+```
+
+`assets/icon-source.png` is the only file to edit. It is a finished app-store
+render — the padlock inside a dark squircle, on a black margin — and that shape
+is the reason the others cannot just be resized copies of it. Every platform
+masks the icon itself, so a baked squircle handed to iOS gets rounded twice and
+ends up floating inside black corners; the script crops to the tile and fills
+what the rounding left behind, so the result is full bleed and the OS does the
+only rounding.
+
+The Android layers are a different shape again. An adaptive icon is 108dp of
+which only the central 66dp survives every launcher mask, so the foreground is
+the padlock lifted off its tile onto transparency and scaled to fit that circle
+— which is why it looks smaller than the iOS icon, and why the background is
+`backgroundColor` rather than an image. The same silhouette, white, is the
+monochrome layer Android 13 tints for themed icons.
+
+The script finds the tile and the padlock by thresholding luminance rather than
+by coordinates: the margin is black, the tile is very dark, the padlock is
+bright. A new render can replace the source and be re-cut without touching any
+numbers, provided it keeps that arrangement.
+
+The splash is one dark screen in both themes — `#0E1014`, the same field the
+artwork sits on. The glyph has a transparent centre and cyan detail that would
+have nothing to hold it against on white, so a light-mode variant needs a
+redesigned asset rather than a second `backgroundColor`.
+
 ## Notes
 
 - Folders are single-depth by design. Deleting a folder moves its codes to
