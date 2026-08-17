@@ -10,6 +10,7 @@
     "backgroundColor": "#0E1014",
     "ios": {
       "supportsTablet": true,
+      "icon": "./assets/icon.png",
       "bundleIdentifier": "au.com.moates.authenticator",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
@@ -17,6 +18,7 @@
     },
     "android": {
       "package": "au.com.moates.authenticator",
+      "icon": "./assets/icon.png",
       "adaptiveIcon": {
         "backgroundColor": "#0E1014",
         "foregroundImage": "./assets/android-icon-foreground.png",
