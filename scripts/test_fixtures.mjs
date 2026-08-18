@@ -30,6 +30,11 @@ const RFC_SHA512 =
 /**
  * `accepts: true` means the URI must parse and reach the confirmation form.
  * Anything else must be turned away with a readable notice and no saved entry.
+ *
+ * Every accepted fixture carries its own secret. Sharing one makes rows show the
+ * same digits, which reads as a rendering bug on device and hides real ones: two
+ * entries whose codes track each other cannot tell you whether the list is
+ * keying rows correctly. checkSecrets below fails the build if a seed is reused.
  */
 const FIXTURES = [
   {
@@ -43,21 +48,21 @@ const FIXTURES = [
     group: 'Standard',
     title: 'No issuer parameter',
     exercises: 'Issuer comes from the label alone, and the account ends up empty.',
-    uri: 'otpauth://totp/Fastmail?secret=JBSWY3DPEHPK3PXP',
+    uri: 'otpauth://totp/Fastmail?secret=MZQXG5DNMFUWYLJR',
     accepts: true,
   },
   {
     group: 'Standard',
     title: 'Label with spaces and a plus address',
     exercises: 'Percent-decoding of both label halves. Check the row does not show %20 or %2B.',
-    uri: 'otpauth://totp/Big%20Corp%20Ltd:first.last%2Btag@example.com?secret=JBSWY3DPEHPK3PXP&issuer=Big%20Corp%20Ltd',
+    uri: 'otpauth://totp/Big%20Corp%20Ltd:first.last%2Btag@example.com?secret=MJUWOY3POJYGY5DE&issuer=Big%20Corp%20Ltd',
     accepts: true,
   },
   {
     group: 'Standard',
     title: 'Very long issuer and account',
     exercises: 'Row layout under overflow. Neither name should push the code off screen.',
-    uri: 'otpauth://totp/Department%20of%20Infrastructure%20and%20Regional%20Development:marcus.oates.longaddress@some-very-long-domain-name.example.com?secret=JBSWY3DPEHPK3PXP&issuer=Department%20of%20Infrastructure%20and%20Regional%20Development',
+    uri: 'otpauth://totp/Department%20of%20Infrastructure%20and%20Regional%20Development:marcus.oates.longaddress@some-very-long-domain-name.example.com?secret=NRXW4Z3OMFWWK4ZR&issuer=Department%20of%20Infrastructure%20and%20Regional%20Development',
     accepts: true,
   },
 
@@ -87,21 +92,21 @@ const FIXTURES = [
     group: 'Off cadence',
     title: '60-second period',
     exercises: 'isOffCadence, so the row carries its own timer instead of the shared ring.',
-    uri: 'otpauth://totp/Slow%20Service:you@example.com?secret=JBSWY3DPEHPK3PXP&issuer=Slow%20Service&period=60',
+    uri: 'otpauth://totp/Slow%20Service:you@example.com?secret=ONWG653TOZRS2NRQ&issuer=Slow%20Service&period=60',
     accepts: true,
   },
   {
     group: 'Off cadence',
     title: '15-second period',
     exercises: 'A fast per-row timer, obvious at a glance next to the 30-second ring.',
-    uri: 'otpauth://totp/Fast%20Service:you@example.com?secret=JBSWY3DPEHPK3PXP&issuer=Fast%20Service&period=15',
+    uri: 'otpauth://totp/Fast%20Service:you@example.com?secret=MZQXG5DTOZRS2MJV&issuer=Fast%20Service&period=15',
     accepts: true,
   },
   {
     group: 'Off cadence',
     title: 'HOTP, counter 0',
     exercises: 'No countdown at all. Tap to advance and confirm the counter persists across a restart.',
-    uri: 'otpauth://hotp/Counter%20Based:you@example.com?secret=JBSWY3DPEHPK3PXP&issuer=Counter%20Based&counter=0',
+    uri: 'otpauth://hotp/Counter%20Based:you@example.com?secret=NBXXI4D2MVZG6LJR&issuer=Counter%20Based&counter=0',
     accepts: true,
   },
 
@@ -161,6 +166,24 @@ function checkFixture(fixture) {
   return { parses: true };
 }
 
+/**
+ * Two accepted fixtures sharing a seed generate the same digits, so the page
+ * stops being able to show that rows are independent. Rejected fixtures are
+ * exempt: they never reach the list, and several are broken on purpose.
+ */
+function checkSecrets() {
+  const owners = new Map();
+  const clashes = [];
+
+  for (const fixture of FIXTURES.filter((f) => f.accepts)) {
+    const secret = (fixture.uri.match(/[?&]secret=([^&]*)/) ?? [])[1] ?? '';
+    const first = owners.get(secret);
+    if (first) clashes.push(`${fixture.title}: reuses the secret from "${first}"`);
+    else owners.set(secret, fixture.title);
+  }
+  return clashes;
+}
+
 function escapeHtml(value) {
   return value
     .replace(/&/g, '&amp;')
@@ -178,7 +201,7 @@ function qrWidth(uri) {
 
 /** Writes the page and returns any fixtures that did not behave as declared. */
 export async function render() {
-  const problems = [];
+  const problems = checkSecrets();
   const cards = [];
 
   for (const [index, fixture] of FIXTURES.entries()) {

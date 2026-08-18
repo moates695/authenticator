@@ -17,7 +17,7 @@
       }
     },
     "android": {
-      "package": "au.com.moates.authenticator",
+      "package": "au.com.moates.authenticator_moates",
       "icon": "./assets/icon.png",
       "adaptiveIcon": {
         "backgroundColor": "#0E1014",
