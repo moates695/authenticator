@@ -21,6 +21,9 @@ expo-env.d.ts
 # Metro
 .metro-health-check*
 
+# generated test fixtures
+scripts/fixtures.html
+
 # debug
 npm-debug.*
 yarn-debug.*
@@ -30,12 +33,21 @@ yarn-error.*
 .DS_Store
 *.pem
 
-# local env files
-.env*.local
+# local env files. EXPO_PUBLIC_* values are inlined into the bundle, so nothing
+# here is a secret from anyone holding the app — but the development account's
+# passphrase is still not something to commit.
+.env
+.env.*
+!.env.example
 
 # typescript
 *.tsbuildinfo
 
-# generated native folders
+# python bytecode, from the scripts under .claude/skills
+__pycache__/
+.pytest_cache/
+
+# generated native folders. EAS builds them in the cloud from app.json, and a
+# stale copy here would be prebuilt over anyway.
 /ios
 /android

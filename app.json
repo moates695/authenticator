@@ -10,17 +10,18 @@
     "backgroundColor": "#0E1014",
     "ios": {
       "supportsTablet": true,
+      "icon": "./assets/icon.png",
       "bundleIdentifier": "au.com.moates.authenticator",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
-      "package": "au.com.moates.authenticator",
+      "package": "au.com.moates.authenticator_moates",
+      "icon": "./assets/icon.png",
       "adaptiveIcon": {
         "backgroundColor": "#0E1014",
         "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false,
@@ -46,7 +47,23 @@
         {
           "faceIDPermission": "Authenticator uses Face ID to unlock your codes."
         }
+      ],
+      "expo-font",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#0E1014",
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 220
+        }
       ]
-    ]
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "ebd4a8c5-c003-440d-9ba7-28353ce09b01"
+      }
+    },
+    "owner": "moates"
   }
 }

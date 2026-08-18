@@ -1,14 +1,7 @@
 import { useState } from 'react';
-import {
-  Alert,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
+import { ConfirmDialog, NameDialog } from '@/components/dialog';
 import { useTheme } from '@/theme/theme_context';
 import { useVault } from '@/vault/vault_store';
 
@@ -17,8 +10,10 @@ export default function FoldersScreen() {
   const { vault, addFolder, renameFolder, deleteFolder } = useVault();
 
   const [newName, setNewName] = useState('');
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editingName, setEditingName] = useState('');
+  /** The folder being renamed, kept so the dialog can seed and title itself. */
+  const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null);
+  /** The folder awaiting delete confirmation, kept so the dialog can name it. */
+  const [deleting, setDeleting] = useState<{ id: string; name: string } | null>(null);
 
   const folders = [...vault.folders].sort((a, b) => a.order - b.order);
 
@@ -32,32 +27,25 @@ export default function FoldersScreen() {
     await addFolder(name).catch(() => {});
   };
 
-  const commitRename = async () => {
-    if (!editingId) return;
-    const name = editingName.trim();
-    const id = editingId;
-    setEditingId(null);
-    if (name) await renameFolder(id, name).catch(() => {});
+  const commitRename = (name: string) => {
+    if (!renaming) return;
+    const id = renaming.id;
+    setRenaming(null);
+    void renameFolder(id, name).catch(() => {});
   };
 
-  const confirmDelete = (id: string, name: string) => {
+  const confirmDelete = () => {
+    if (!deleting) return;
+    const id = deleting.id;
+    setDeleting(null);
+    void deleteFolder(id).catch(() => {});
+  };
+
+  const deleteMessage = (id: string) => {
     const count = countIn(id);
-    Alert.alert(
-      `Delete "${name}"?`,
-      count > 0
-        ? `The ${count} code${count === 1 ? '' : 's'} inside will move to Ungrouped. No codes are deleted.`
-        : 'This folder is empty.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete folder',
-          style: 'destructive',
-          onPress: () => {
-            void deleteFolder(id).catch(() => {});
-          },
-        },
-      ],
-    );
+    return count > 0
+      ? `The ${count} code${count === 1 ? '' : 's'} inside will move to "No folder". No codes are deleted.`
+      : 'This folder is empty.';
   };
 
   return (
@@ -120,7 +108,7 @@ export default function FoldersScreen() {
 
       {folders.length === 0 ? (
         <Text style={{ color: colors.textMuted, fontSize: 14, textAlign: 'center', marginTop: 24 }}>
-          No folders yet. Codes without a folder appear under Ungrouped.
+          No folders yet. All your codes appear together on the home screen.
         </Text>
       ) : (
         <View style={{ gap: spacing.sm }}>
@@ -128,7 +116,6 @@ export default function FoldersScreen() {
             YOUR FOLDERS
           </Text>
           {folders.map((folder) => {
-            const editing = editingId === folder.id;
             const count = countIn(folder.id);
 
             return (
@@ -141,61 +128,59 @@ export default function FoldersScreen() {
                   gap: spacing.sm,
                 }}
               >
-                {editing ? (
-                  <View style={{ flexDirection: 'row', gap: spacing.sm, alignItems: 'center' }}>
-                    <TextInput
-                      value={editingName}
-                      onChangeText={setEditingName}
-                      onSubmitEditing={commitRename}
-                      autoFocus
-                      returnKeyType="done"
-                      style={{
-                        flex: 1,
-                        backgroundColor: colors.surfaceAlt,
-                        borderRadius: radius.sm,
-                        paddingVertical: spacing.sm,
-                        paddingHorizontal: spacing.md,
-                        color: colors.text,
-                        fontSize: 15,
-                      }}
-                    />
-                    <Pressable onPress={commitRename} hitSlop={8}>
-                      <Text style={{ color: colors.accent, fontSize: 14, fontWeight: '600' }}>
-                        Save
-                      </Text>
+                <View style={styles.folderRow}>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={{ color: colors.text, fontSize: 16 }} numberOfLines={1}>
+                      {folder.name}
+                    </Text>
+                    <Text style={{ color: colors.textFaint, fontSize: 12, marginTop: 2 }}>
+                      {count} code{count === 1 ? '' : 's'}
+                    </Text>
+                  </View>
+                  <View style={{ flexDirection: 'row', gap: spacing.lg }}>
+                    <Pressable
+                      onPress={() => setRenaming({ id: folder.id, name: folder.name })}
+                      hitSlop={8}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Rename folder ${folder.name}`}
+                    >
+                      <Text style={{ color: colors.accent, fontSize: 14 }}>Rename</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => setDeleting({ id: folder.id, name: folder.name })}
+                      hitSlop={8}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Delete folder ${folder.name}`}
+                    >
+                      <Text style={{ color: colors.danger, fontSize: 14 }}>Delete</Text>
                     </Pressable>
                   </View>
-                ) : (
-                  <View style={styles.folderRow}>
-                    <View style={{ flex: 1, minWidth: 0 }}>
-                      <Text style={{ color: colors.text, fontSize: 16 }} numberOfLines={1}>
-                        {folder.name}
-                      </Text>
-                      <Text style={{ color: colors.textFaint, fontSize: 12, marginTop: 2 }}>
-                        {count} code{count === 1 ? '' : 's'}
-                      </Text>
-                    </View>
-                    <View style={{ flexDirection: 'row', gap: spacing.lg }}>
-                      <Pressable
-                        onPress={() => {
-                          setEditingId(folder.id);
-                          setEditingName(folder.name);
-                        }}
-                        hitSlop={8}
-                      >
-                        <Text style={{ color: colors.accent, fontSize: 14 }}>Rename</Text>
-                      </Pressable>
-                      <Pressable onPress={() => confirmDelete(folder.id, folder.name)} hitSlop={8}>
-                        <Text style={{ color: colors.danger, fontSize: 14 }}>Delete</Text>
-                      </Pressable>
-                    </View>
-                  </View>
-                )}
+                </View>
               </View>
             );
           })}
         </View>
       )}
+
+      <NameDialog
+        visible={renaming !== null}
+        title="Rename folder"
+        placeholder="Folder name"
+        initialValue={renaming?.name ?? ''}
+        confirmLabel="Rename"
+        onCancel={() => setRenaming(null)}
+        onConfirm={commitRename}
+      />
+
+      <ConfirmDialog
+        visible={deleting !== null}
+        title={`Delete "${deleting?.name ?? ''}"?`}
+        message={deleting ? deleteMessage(deleting.id) : undefined}
+        confirmLabel="Delete folder"
+        destructive
+        onCancel={() => setDeleting(null)}
+        onConfirm={confirmDelete}
+      />
     </ScrollView>
   );
 }

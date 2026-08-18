@@ -1,7 +1,6 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   Animated,
   Easing,
   Pressable,
@@ -11,13 +10,15 @@ import {
   View,
 } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { Link, useRouter } from 'expo-router';
+import { Link, useFocusEffect, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { CodeRow } from '@/components/CodeRow';
 import { CountdownRing } from '@/components/CountdownRing';
+import { GroupHeading } from '@/components/group_heading';
 import { useTheme } from '@/theme/theme_context';
-import { entryTitle, type Entry } from '@/vault/types';
+import { groupKey, useCollapsedFolders, validGroupKeys } from '@/vault/collapse';
+import { type Entry } from '@/vault/types';
 import { groupEntries, useVault } from '@/vault/vault_store';
 
 type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
@@ -29,10 +30,55 @@ export default function HomeScreen() {
   const { colors, spacing, radius } = useTheme();
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { vault, loading, error, deleteEntry, advanceCounter } = useVault();
+  const { vault, loading, error, advanceCounter } = useVault();
 
   const groups = useMemo(() => groupEntries(vault), [vault]);
   const isEmpty = vault.entries.length === 0;
+
+  const { collapsed, loaded: collapseLoaded, toggle, close, retain } = useCollapsedFolders();
+
+  // Folders deleted while their heading was closed would otherwise leave their
+  // key in the stored set forever.
+  useEffect(() => {
+    if (!collapseLoaded || loading) return;
+    retain(validGroupKeys(vault.folders));
+  }, [collapseLoaded, loading, vault.folders, retain]);
+
+  const emptyGroupKeys = useMemo(
+    () =>
+      groups
+        .filter((group) => group.entries.length === 0)
+        .map((group) => groupKey(group.folder)),
+    [groups],
+  );
+
+  /**
+   * An empty folder is a heading with nothing under it, so it comes back closed
+   * every time the user arrives at the list — including after emptying it from
+   * somewhere else. Only on arrival: closing it out from under someone who has
+   * just opened it to check would be its own annoyance.
+   */
+  const [closeEmptyPending, setCloseEmptyPending] = useState(true);
+
+  useFocusEffect(
+    useCallback(() => {
+      setCloseEmptyPending(true);
+    }, []),
+  );
+
+  useEffect(() => {
+    // The vault and the stored preference both have to have landed, or there is
+    // nothing meaningful to call empty yet.
+    if (!closeEmptyPending || !collapseLoaded || loading) return;
+    close(emptyGroupKeys);
+    setCloseEmptyPending(false);
+  }, [closeEmptyPending, collapseLoaded, loading, emptyGroupKeys, close]);
+
+  /**
+   * The one row currently showing its settings action. Held here rather than in
+   * each row so swiping a second row puts the first one away.
+   */
+  const [openRowId, setOpenRowId] = useState<string | null>(null);
 
   const [menuOpen, setMenuOpen] = useState(false);
   // Drives the backdrop fade, the menu rise, and the plus-to-cross rotation from
@@ -60,24 +106,28 @@ export default function HomeScreen() {
     [router, setMenu],
   );
 
-  const confirmDelete = useCallback(
+  const handleOpenChange = useCallback((entry: Entry, open: boolean) => {
+    // Closing is scoped to the row that asked: a row springing shut must not
+    // clear the state of whichever row has just been swiped open instead.
+    setOpenRowId((current) => (open ? entry.id : current === entry.id ? null : current));
+  }, []);
+
+  const openEntrySettings = useCallback(
     (entry: Entry) => {
-      Alert.alert(
-        `Remove ${entryTitle(entry)}?`,
-        'This deletes the code from this device. Make sure you can still sign in another way first.',
-        [
-          { text: 'Cancel', style: 'cancel' },
-          {
-            text: 'Remove',
-            style: 'destructive',
-            onPress: () => {
-              void deleteEntry(entry.id).catch(() => {});
-            },
-          },
-        ],
-      );
+      setOpenRowId(null);
+      router.push({ pathname: '/entry/[id]', params: { id: entry.id } });
     },
-    [deleteEntry],
+    [router],
+  );
+
+  const toggleGroup = useCallback(
+    (key: string) => {
+      // A row swiped open inside the folder being closed would come back open
+      // the next time the folder is expanded.
+      setOpenRowId(null);
+      toggle(key);
+    },
+    [toggle],
   );
 
   const handleAdvanceCounter = useCallback(
@@ -126,7 +176,9 @@ export default function HomeScreen() {
         </View>
       ) : null}
 
-      {loading ? (
+      {/* Waiting on the collapse preference too, so a closed folder cannot
+          flash open on the way in. */}
+      {loading || !collapseLoaded ? (
         <View style={styles.centre}>
           <ActivityIndicator color={colors.accent} />
         </View>
@@ -137,31 +189,46 @@ export default function HomeScreen() {
           contentContainerStyle={{
             paddingHorizontal: spacing.lg,
             paddingBottom: insets.bottom + 96,
-            gap: spacing.xl,
+            // The headings carry their own tap-target height, so a small gap is
+            // enough to keep the folders apart.
+            gap: spacing.sm,
           }}
+          // Starting a scroll means the user has moved on from the open row.
+          onScrollBeginDrag={() => setOpenRowId(null)}
         >
-          {groups.map((group) => (
-            <View key={group.folder?.id ?? 'unfiled'} style={{ gap: spacing.sm }}>
-              <Text
-                style={[
-                  styles.groupHeading,
-                  { color: colors.textMuted, paddingHorizontal: spacing.xs },
-                ]}
-              >
-                {(group.folder?.name ?? 'Ungrouped').toUpperCase()}
-              </Text>
-              <View style={{ gap: spacing.sm }}>
-                {group.entries.map((entry) => (
-                  <CodeRow
-                    key={entry.id}
-                    entry={entry}
-                    onLongPress={confirmDelete}
-                    onAdvanceCounter={handleAdvanceCounter}
-                  />
-                ))}
+          {groups.map((group) => {
+            const key = groupKey(group.folder);
+            const isCollapsed = collapsed.has(key);
+
+            return (
+              <View key={key} style={{ gap: spacing.sm }}>
+                <GroupHeading
+                  title={group.folder?.name ?? 'No folder'}
+                  count={group.entries.length}
+                  collapsed={isCollapsed}
+                  onToggle={() => toggleGroup(key)}
+                />
+                {isCollapsed ? null : group.entries.length === 0 ? (
+                  <Text style={[styles.emptyBody, { color: colors.textMuted }]}>
+                    No codes in this folder.
+                  </Text>
+                ) : (
+                  <View style={{ gap: spacing.sm }}>
+                    {group.entries.map((entry) => (
+                      <CodeRow
+                        key={entry.id}
+                        entry={entry}
+                        open={openRowId === entry.id}
+                        onOpenChange={handleOpenChange}
+                        onOpenSettings={openEntrySettings}
+                        onAdvanceCounter={handleAdvanceCounter}
+                      />
+                    ))}
+                  </View>
+                )}
               </View>
-            </View>
-          ))}
+            );
+          })}
         </ScrollView>
       )}
 
@@ -362,11 +429,6 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  groupHeading: {
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 0.8,
   },
   emptyTitle: {
     fontSize: 18,

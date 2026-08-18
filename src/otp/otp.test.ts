@@ -208,20 +208,27 @@ describe('toOtpauthUri', () => {
 });
 
 describe('formatCode', () => {
-  it('splits six digits into halves', () => {
+  it('splits the usual six digits into two groups of three', () => {
     expect(formatCode('123456')).toBe('123 456');
   });
 
-  it('splits eight digits into halves', () => {
-    expect(formatCode('12345678')).toBe('1234 5678');
+  it('keeps grouping in threes past six digits, leaving a short tail', () => {
+    expect(formatCode('12345678')).toBe('123 456 78');
+    expect(formatCode('1234567')).toBe('123 456 7');
   });
 
-  it('splits an odd length with the larger half first', () => {
-    expect(formatCode('1234567')).toBe('1234 567');
+  it('groups nine digits evenly', () => {
+    expect(formatCode('123456789')).toBe('123 456 789');
   });
 
-  it('leaves very short codes alone', () => {
-    expect(formatCode('1234')).toBe('1234');
+  it('leaves a code shorter than a group alone', () => {
+    expect(formatCode('123')).toBe('123');
+  });
+
+  it('never leaves a trailing space', () => {
+    for (const code of ['123', '1234', '12345', '123456', '1234567890']) {
+      expect(formatCode(code)).toBe(formatCode(code).trim());
+    }
   });
 });
 
