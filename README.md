@@ -308,14 +308,15 @@ entire brute-force surface. `/v1/verify` is throttled per challenge instead of
 per address: five wrong guesses destroy it, which is what keeps six digits
 worth using.
 
-**Deployment target.** FastAPI plus Postgres, two containers at
-`/opt/authenticator` on the droplet, with the app added to `nginx-proxy-prod` as
-another upstream on a `moates.com.au` subdomain behind Cloudflare, matching how
-Vaultwarden is already wired. The box runs seven containers on 2GB with roughly
-760MB free, so both are capped at 256MB and Postgres is tuned down to 32MB of
-shared buffers: this is six small tables and a few requests per device per day,
-not a workload. The database is on an internal network with no published ports,
-reachable only by the app container.
+**Deployment target.** FastAPI in one container at `/opt/authenticator` on the
+droplet, storing everything in the PostgreSQL installed on the box rather than a
+Postgres of its own, with the app added to `nginx-proxy-prod` as another upstream
+on a `moates.com.au` subdomain behind Cloudflare, matching how Vaultwarden is
+already wired. The box runs several containers on 2GB with roughly 760MB free, so
+the app is capped at 256MB and the database costs nothing extra: this is six
+small tables and a few requests per device per day, not a workload. The app
+reaches Postgres at `host.docker.internal`, which is how the other apps on the
+box already reach the same install.
 
 ## Development
 

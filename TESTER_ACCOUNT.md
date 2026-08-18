@@ -157,8 +157,7 @@ When the app no longer needs testers on it:
    nothing further, so it is a query on the droplet:
 
    ```bash
-   docker exec -it authenticator-postgres-prod \
-     psql -U authenticator -d authenticator \
+   sudo -u postgres psql -d authenticator \
      -c "DELETE FROM users WHERE email = 'test@app.com'"
    ```
 

@@ -112,12 +112,22 @@ server that cannot reach its database fails to boot with a reason, rather than
 quietly opening a local one and looking fine while it collects accounts nobody
 will find again.
 
-Two environments, dev and production, and they never meet. Production is
-`authenticator` on the droplet's own Postgres container; dev is `authenticator`
-on the PostgreSQL 17 installed on Windows. Nothing is shared, so a test account
-cannot appear in production — provided the app is pointed here rather than at the
+Two environments, dev and production, and they never meet. Both are a Postgres
+installed on the machine rather than one in a container: production is
+`authenticator` on the droplet's own PostgreSQL, dev is `authenticator` on the
+PostgreSQL 17 installed on Windows. Nothing is shared, so a test account cannot
+appear in production — provided the app is pointed here rather than at the
 droplet, which is what `EXPO_PUBLIC_SYNC_URL` is for and why a development build
 refuses to start without it.
+
+The droplet's install is the one the box already backs up and upgrades, and the
+one `dating`, `watts`, `gym_tracker` and `analytics` are already in. The app
+reaches it the same way those do: `docker-compose.yml` maps
+`host.docker.internal` to `host-gateway` and `DATABASE_URL` names that host on
+5432. Nothing had to be added to `postgresql.conf` or `pg_hba.conf` for it —
+the install already listens on `*` and already has a `host all all
+172.16.0.0/12 md5` rule covering the docker networks. Being the one app on the
+box that connected differently would have cost more than it was worth.
 
 The test suite runs against the dev database too, and is kept off its rows by a
 schema per test rather than by a database of its own: it creates `test_…`,
@@ -128,9 +138,10 @@ empty schema. `TEST_DATABASE_URL` points the suite elsewhere if that is ever
 wanted — deliberately not `DATABASE_URL`, so a shell that already has the
 server's environment in it cannot quietly decide where the tests run.
 
-Dev is on 17 and the droplet on 16. Nothing here uses anything newer than 16, so
-this works, but it is a difference worth remembering when reading a plan or a
-error message that turns out to be version-specific.
+Dev is on 17; the droplet is on whatever its own install is — `psql --version`
+there answers it. Nothing here uses anything newer than 14, so any current
+version works, but a version difference between the two is worth remembering when
+reading a plan or an error message that turns out to be version-specific.
 
 **One-time setup**, against the Windows install, as `postgres`:
 
@@ -159,9 +170,9 @@ cd server
 SMTP_USERNAME=other@gmail.com uv run python deploy/dev_server.py
 ```
 
-`DATABASE_URL` is the one exception: `.env` carries the droplet's, which is
-reachable only from inside the compose network, so the file's copy is ignored and
-only a shell export counts. The local address comes from
+`DATABASE_URL` is the one exception: `.env` carries the droplet's, which names a
+host that means the droplet rather than this machine, so the file's copy is
+ignored and only a shell export counts. The local address comes from
 `deploy/dev_database_url.py` rather than a literal, because there isn't a stable
 one to write down — WSL2 is in NAT mode here, so the Windows host is the default
 gateway and that address changes whenever WSL restarts. The script works it out,
@@ -273,19 +284,49 @@ container name from `nginx-proxy-prod`. It publishes no ports. The wildcard
 `*.moates.com.au` Cloudflare origin certificate is already mounted for the
 sibling sites, so no new certificate is needed.
 
-**One manual prerequisite:** a Cloudflare DNS record for
-`authenticator.moates.com.au`, proxied, pointing at the droplet.
+**Two manual prerequisites:** a Cloudflare DNS record for
+`authenticator.moates.com.au`, proxied, pointing at the droplet; and a role and
+database on the droplet's own PostgreSQL, since compose no longer brings one up.
+
+The install is shared with the other apps on the box, so this only adds a role
+and a database of its own — nothing here retunes the server, and no
+`postgresql.conf` or `pg_hba.conf` change is needed, because the rules the other
+containers already come in on cover this one. Once, as `postgres`:
+
+```sql
+CREATE ROLE authenticator LOGIN PASSWORD '…';   -- the password DATABASE_URL carries
+CREATE DATABASE authenticator OWNER authenticator;
+```
 
 ```bash
 # On the droplet
 git clone <this repo> /opt/authenticator      # or pull, if already cloned
 cd /opt/authenticator/server
 cp .env.example .env
-# Fill in POSTGRES_PASSWORD and put the same password into DATABASE_URL. Neither
-# has a default, and the app container will not start without both.
+# Put the role's password into DATABASE_URL. It has no default, and the app
+# container will not start without it.
+
+# Only when coming from the old Postgres container, and before the app is
+# started: its accounts are in the `authenticator-pgdata` volume, which nothing
+# mounts any more, and a dump will not load into a database the new server has
+# already created its tables in. Stop the old container first so nothing is
+# mid-write, then read the volume with a throwaway Postgres of the same major
+# version — `--user postgres` because the server refuses to run as root, and no
+# listen_addresses because only its own socket is wanted.
+docker rm -f authenticator-postgres-prod
+docker run --rm --user postgres -v authenticator-pgdata:/var/lib/postgresql/data \
+  postgres:16-alpine sh -c 'pg_ctl -D /var/lib/postgresql/data \
+    -o "-c listen_addresses=" -w start >/dev/null && \
+    pg_dump -U authenticator authenticator' \
+  > /tmp/authenticator.sql
+sudo -u postgres psql -d authenticator -f /tmp/authenticator.sql
+rm /tmp/authenticator.sql
+# Keep the volume until the accounts are verified in the new database:
+#   docker volume rm authenticator-pgdata
+
 docker compose up -d --build
 
-# Only when coming from the old SQLite build: move the accounts across before
+# Only when coming from the older SQLite build: move the accounts across before
 # anyone signs in, so a fresh empty database is not what they find. The old
 # ./data directory is no longer mounted by the service, so mount it just for
 # this — writable, because the old database is in WAL mode and SQLite cannot
@@ -320,23 +361,27 @@ curl -s https://authenticator.moates.com.au/health
   the Cloudflare-only origin lock, and optionally a Cloudflare rate-limit rule.
 - **Cloudflare IP ranges** are duplicated in the vhost (snapshot 2026-07-22) and
   must be kept in step with the `vault.moates.com.au` block.
-- **Backups.** The `pgdata` volume is the only state. Add a `pg_dump` to the same
-  age-encrypted pipeline as Vaultwarden — never `cp` the volume out from under a
-  running Postgres:
+- **Backups.** The `authenticator` database is the only state, and it now sits in
+  the droplet's own PostgreSQL, so whatever already dumps that install covers it.
+  If nothing does, add a `pg_dump` to the same age-encrypted pipeline as
+  Vaultwarden — never `cp` the data directory out from under a running Postgres:
 
   ```bash
-  docker compose exec -T postgres pg_dump -U authenticator authenticator | age -r … > backup.sql.age
+  sudo -u postgres pg_dump authenticator | age -r … > backup.sql.age
   ```
 
-- **Restoring.** Bring up an empty `postgres` service, then feed the dump back in
-  with `psql -U authenticator authenticator`. The app creates its own schema at
+- **Restoring.** `dropdb`/`createdb` the database as `postgres`, owner
+  `authenticator`, then feed the dump back in with
+  `sudo -u postgres psql authenticator`. The app creates its own schema at
   startup, so a restore into a database the server has already touched wants an
   empty one first.
 - **Migrating off the old SQLite.** `deploy/migrate_sqlite_to_postgres.py` moves
   an existing `authenticator.db` across, sessions included so the phones already
   out there stay signed in. It reports and stops without `--yes`, and refuses a
   target that already holds rows.
-- **Footprint.** Two containers capped at 256MB each, one uvicorn worker, and
-  Postgres tuned down to 32MB of shared buffers — this is six small tables, not a
-  workload. Access logging is off deliberately: the log would otherwise be a
-  record of which accounts synced when.
+- **Footprint.** One container capped at 256MB and one uvicorn worker; the
+  database costs nothing extra, because it is an install the droplet was already
+  running. This is six small tables and a handful of requests per device per day,
+  not a workload — worth remembering before tuning anything on its account.
+  Access logging is off deliberately: the log would otherwise be a record of
+  which accounts synced when.
