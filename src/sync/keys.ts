@@ -1,5 +1,6 @@
 import { argon2idAsync } from '@noble/hashes/argon2.js';
 import { expand } from '@noble/hashes/hkdf.js';
+import { scryptAsync } from '@noble/hashes/scrypt.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { utf8ToBytes } from '@noble/hashes/utils.js';
 import * as Crypto from 'expo-crypto';
@@ -14,7 +15,7 @@ import { YIELD_BUDGET_MS, installEventLoopYield } from './js_thread';
  *   passphrase ─┬─Argon2id(AUTH_KDF, 8MiB)──> auth key ──> the server (which
  *               │                                          only ever sees a
  *               │                                          scrypt digest of it)
- *               └─Argon2id(DEFAULT_KDF, 32MiB)──> encryption key ──┐
+ *               └─scrypt(DEFAULT_KDF, 64MiB)──> encryption key ──┐
  *                                                                  │ unwraps
  *   random 32 bytes ──────────────────────────> data key <─────────┘
  *                                                   │ encrypts
@@ -28,8 +29,8 @@ import { YIELD_BUDGET_MS, installEventLoopYield } from './js_thread';
  * put all of its cost in front of the code; splitting it puts the light half
  * there and the heavy half after, where the user is already through the door.
  *
- * The two are independent: different salts, different parameters, and neither is
- * derivable from the other. What the split costs is that an attacker holding the
+ * The two are independent: different salts, different algorithms, different
+ * parameters, and neither is derivable from the other. What the split costs is that an attacker holding the
  * server's database can test a guessed passphrase against the auth key's digest
  * for less than the encryption key would have charged them — see
  * server/app/crypto.py, whose scrypt parameters are set to carry that.
@@ -41,7 +42,7 @@ import { YIELD_BUDGET_MS, installEventLoopYield } from './js_thread';
  * wrapped under a recovery key, for the day the passphrase is forgotten.
  */
 
-export type KdfParams = {
+export type Argon2idParams = {
   algorithm: 'argon2id';
   /** Memory cost in kibibytes. */
   memory_kib: number;
@@ -49,24 +50,68 @@ export type KdfParams = {
   parallelism: number;
 };
 
+export type ScryptParams = {
+  algorithm: 'scrypt';
+  /**
+   * Memory cost in kibibytes, as for Argon2id, so the two are comparable at a
+   * glance. scrypt states the same quantity as `N` blocks of `128 * r` bytes;
+   * `scryptCost` below converts, and rejects a pair that is not a power of two
+   * apart.
+   */
+  memory_kib: number;
+  /** scrypt's `r`: how much of that memory is touched per sequential step. */
+  block_size: number;
+  parallelism: number;
+};
+
 /**
- * Tuned for pure-JS Argon2id under Hermes, which is perhaps an order of
- * magnitude slower than the native builds these numbers usually assume. 32MiB
- * with four passes stays firmly memory-hard while keeping an unlock to a wait
- * the progress bar can explain.
+ * Two algorithms, because accounts made before the switch keep the one they
+ * were made under — see `DEFAULT_KDF`. The block travels opaquely through
+ * api.ts; `stretch` is the only thing that reads inside it.
+ */
+export type KdfParams = Argon2idParams | ScryptParams;
+
+/**
+ * scrypt at 64MiB, which is twice the memory Argon2id was set to here and a
+ * fraction of the time to get through.
  *
- * These are stored per account and handed back by `/v1/prelogin`, so raising
+ * That sounds like a free lunch and is not; it is a JS-specific one. Argon2's
+ * compression function is BLAKE2b, whose adds and rotates are 64-bit. JS has no
+ * 64-bit integer, so noble emulates each one with a pair of u32s plus carry
+ * handling, and Hermes has no JIT to claw any of it back. scrypt's core is
+ * Salsa20/8 — 32-bit throughout, which is the width a JS engine actually works
+ * in. Measured through this app's own derivation path: the 32MiB of Argon2id
+ * this replaced took about nineteen times what 64MiB of scrypt takes.
+ *
+ * Argon2id is the better primitive given an equal run — its hybrid indexing
+ * buys more against GPUs and ASICs per unit of memory. But an attacker is not
+ * running our JS; they are running native code, and what costs them is memory.
+ * More memory in less time is the better side of that trade.
+ *
+ * Why 64MiB and not more, having got the room: because past it the extra buys
+ * the user a wait and the attacker nothing. Someone holding the server's
+ * database has two ways to test a guessed passphrase — this key against
+ * `wrapped_passphrase`, or the auth key against the digest in `users` — and
+ * they will take whichever is cheaper. The auth path is Argon2id at 8MiB
+ * followed by the server's own scrypt at 64MiB (see server/app/crypto.py), so
+ * 64MiB here is where the two paths cost about the same and neither is the
+ * short way round. Raising this alone only widens a gap nobody has to cross;
+ * what raises the floor is `SCRYPT_N` on the server, which runs native, on our
+ * hardware, and costs the user nothing.
+ *
+ * These are stored per account and handed back by `/v1/prelogin`, so changing
  * them later is a client-side change that leaves existing accounts working on
- * their old parameters until they next change their passphrase.
+ * their old parameters — Argon2id ones included — until something re-wraps
+ * them. `upgradeStoredKdf` in account.tsx is what does, on the next sign-in.
  *
  * They must stay in step with `DEFAULT_KDF` in server/app/config.py, which is
  * what `/v1/prelogin` answers with for an address it has never seen. If the two
  * drift, that answer tells a stranger whether the account exists.
  */
 export const DEFAULT_KDF: KdfParams = {
-  algorithm: 'argon2id',
-  memory_kib: 32768,
-  iterations: 4,
+  algorithm: 'scrypt',
+  memory_kib: 65536,
+  block_size: 8,
   parallelism: 1,
 };
 
@@ -78,6 +123,13 @@ export const DEFAULT_KDF: KdfParams = {
  * without the sign-in button feeling stuck. It is not what protects the vault —
  * `DEFAULT_KDF` is — and the server's scrypt over the result is what stands
  * behind it if the database is ever taken.
+ *
+ * Left on Argon2id where the encryption key moved to scrypt, because the two
+ * changes are not the same size. This key is the one `/v1/login` checks, so
+ * changing it changes what the server is holding a digest of; the encryption
+ * key is checked by nothing but the unwrap it feeds. The same swap is available
+ * here — it would be about four times quicker at this memory — and wants doing
+ * on its own, not folded in with the above.
  *
  * Stored per account like the other set, handed back by `/v1/prelogin`, and
  * matched by `DEFAULT_AUTH_KDF` in server/app/config.py.
@@ -142,6 +194,39 @@ export function authKdfSalt(email: string): Uint8Array {
 }
 
 /**
+ * Whether an account's stored parameters are already what we would derive
+ * under today. Compared field by field rather than by identity, since one side
+ * has been through JSON on its way from the server.
+ *
+ * A false is what starts a re-wrap; see `upgradeStoredKdf` in account.tsx.
+ */
+export function sameKdf(a: KdfParams, b: KdfParams): boolean {
+  if (a.algorithm !== b.algorithm) return false;
+  if (a.memory_kib !== b.memory_kib || a.parallelism !== b.parallelism) return false;
+  return a.algorithm === 'argon2id'
+    ? a.iterations === (b as Argon2idParams).iterations
+    : a.block_size === (b as ScryptParams).block_size;
+}
+
+/**
+ * scrypt counts its memory as `N` blocks of `128 * r` bytes, and takes `N`
+ * rather than a byte figure. Our parameter block states kibibytes, so this
+ * converts — and refuses a pair that does not land on a power of two here,
+ * where the numbers that produced it are still in hand, rather than letting
+ * noble fail deeper in about an `N` the caller never set.
+ */
+function scryptCost(kdf: ScryptParams): number {
+  const cost = (kdf.memory_kib * 1024) / (128 * kdf.block_size);
+  if (!Number.isInteger(cost) || cost < 2 || (cost & (cost - 1)) !== 0) {
+    throw new Error(
+      `scrypt at ${kdf.memory_kib}KiB with block size ${kdf.block_size} needs N=${cost}, ` +
+        'which is not a power of two',
+    );
+  }
+  return cost;
+}
+
+/**
  * Stretches the passphrase into 32 bytes, under whichever salt and parameters
  * the caller is after. The two exported derivations below are the callers.
  *
@@ -168,14 +253,36 @@ async function stretch(
     );
   }
 
-  return argon2idAsync(utf8ToBytes(passphrase.normalize('NFKC')), salt, {
-    t: kdf.iterations,
-    m: kdf.memory_kib,
-    p: kdf.parallelism,
-    dkLen: KEY_BYTES,
-    asyncTick: ASYNC_TICK_MS,
-    onProgress: onProgress && wholePercent(onProgress),
-  });
+  const password = utf8ToBytes(passphrase.normalize('NFKC'));
+  const progress = onProgress && wholePercent(onProgress);
+
+  // The account's own algorithm, not today's default: one made before the
+  // switch still opens on Argon2id, and will until its passphrase changes.
+  if (kdf.algorithm === 'scrypt') {
+    return scryptAsync(password, salt, {
+      N: scryptCost(kdf),
+      r: kdf.block_size,
+      p: kdf.parallelism,
+      dkLen: KEY_BYTES,
+      asyncTick: ASYNC_TICK_MS,
+      onProgress: progress,
+    });
+  }
+  if (kdf.algorithm === 'argon2id') {
+    return argon2idAsync(password, salt, {
+      t: kdf.iterations,
+      m: kdf.memory_kib,
+      p: kdf.parallelism,
+      dkLen: KEY_BYTES,
+      asyncTick: ASYNC_TICK_MS,
+      onProgress: progress,
+    });
+  }
+
+  // The parameters come off the wire, so an algorithm we cannot run is a
+  // reachable state rather than a type error — a newer client's account being
+  // opened on an older build, say. Saying so beats deriving the wrong key.
+  throw new Error(`This version cannot derive keys with ${(kdf as KdfParams).algorithm}.`);
 }
 
 /**

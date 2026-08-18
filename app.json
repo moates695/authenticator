@@ -3,13 +3,13 @@
     "name": "Authenticator",
     "slug": "authenticator",
     "scheme": "authenticator",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
     "backgroundColor": "#0E1014",
     "ios": {
-      "supportsTablet": true,
+      "supportsTablet": false,
       "icon": "./assets/icon.png",
       "bundleIdentifier": "au.com.moates.authenticator",
       "infoPlist": {

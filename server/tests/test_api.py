@@ -16,15 +16,23 @@ import re
 import threading
 import time
 
+import pytest
+
 from app.config import DEFAULT_AUTH_KDF, DEFAULT_KDF, TEST_ACCOUNT_CODE
 from app.crypto import hash_auth_key
 from app.mail import MemoryMailer, SendFailed
 
 # Deliberately not the server's defaults, so the tests that care about stored
-# parameters cannot pass by accident.
+# parameters cannot pass by accident. Argon2id rather than the scrypt new
+# accounts now use, which is the other half of the point: accounts made before
+# the switch are still out there and the server has to keep handing their
+# parameters back exactly as it took them.
 KDF = {"algorithm": "argon2id", "memory_kib": 65536, "iterations": 3, "parallelism": 1}
 # The auth key's own parameters, the light pass that runs before a code is sent.
 AUTH_KDF = {"algorithm": "argon2id", "memory_kib": 8192, "iterations": 1, "parallelism": 1}
+# The shape a new account registers with. `block_size` is scrypt's `r`, and is
+# the field the discriminated union has to pick out instead of `iterations`.
+SCRYPT_KDF = {"algorithm": "scrypt", "memory_kib": 131072, "block_size": 8, "parallelism": 1}
 
 AUTH_KEY = base64.b64encode(bytes(range(32))).decode()
 WRONG_AUTH_KEY = base64.b64encode(bytes(range(32, 64))).decode()
@@ -611,6 +619,50 @@ def test_prelogin_does_not_reveal_a_pending_registration(client, mailbox):
     assert response.json()["auth_kdf"] == DEFAULT_AUTH_KDF
 
 
+def test_prelogin_round_trips_scrypt_parameters(client, mailbox):
+    """
+    What a new account is made with. The block is stored as opaque JSON and
+    handed back on the way in, so a variant the union does not carry properly
+    would come back short a field — and a device given `block_size: None` has no
+    way to work out scrypt's `N` and cannot open its own vault.
+    """
+    enrol(client, mailbox, kdf=SCRYPT_KDF)
+
+    body = client.post("/v1/prelogin", json={"email": EMAIL}).json()
+    assert body["kdf"] == SCRYPT_KDF
+    # The two derivations are on different algorithms, and the account keeps
+    # whichever it was made with for each of them independently.
+    assert body["auth_kdf"] == AUTH_KDF
+
+
+def test_prelogin_returns_scrypt_parameters_in_a_session_too(client, mailbox):
+    """`/v1/verify` carries the heavy parameters as well, and the same union reads them."""
+    session = enrol(client, mailbox, kdf=SCRYPT_KDF)
+    assert session["kdf"] == SCRYPT_KDF
+
+
+@pytest.mark.parametrize(
+    "kdf",
+    [
+        # An algorithm the server has never heard of. Storing it would hand a
+        # device parameters it cannot derive with, and the vault it wrapped
+        # would be unopenable by anything.
+        {"algorithm": "balloon", "memory_kib": 65536, "iterations": 3, "parallelism": 1},
+        # scrypt's discriminator with Argon2id's fields: no block size, so no N.
+        {"algorithm": "scrypt", "memory_kib": 65536, "iterations": 3, "parallelism": 1},
+        # Argon2id's discriminator with scrypt's fields.
+        {"algorithm": "argon2id", "memory_kib": 65536, "block_size": 8, "parallelism": 1},
+        # Past what the union will take on either side.
+        {"algorithm": "scrypt", "memory_kib": 131072, "block_size": 0, "parallelism": 1},
+        {"algorithm": "scrypt", "memory_kib": 1024, "block_size": 8, "parallelism": 1},
+    ],
+)
+def test_verify_rejects_parameters_no_client_could_derive_with(client, mailbox, kdf):
+    challenge = register(client)
+    response = verify(client, challenge.json()["challenge_id"], code_in(mailbox), kdf=kdf)
+    assert response.status_code == 422, response.text
+
+
 def test_prelogin_answers_with_both_derivations(client, mailbox):
     """
     A device signing in needs the light parameters before it can call
@@ -931,6 +983,58 @@ def test_rotating_keys_keeps_the_vault_and_revokes_old_sessions(client, mailbox)
 
     assert login(client, auth_key=AUTH_KEY).status_code == 401
     assert sign_in(client, mailbox, auth_key=NEW_AUTH_KEY).json()["wrapped_passphrase"] == new_wrapped
+
+
+def test_rotating_kdf_params_without_changing_the_passphrase(client, mailbox):
+    """
+    The upgrade path a client takes when `DEFAULT_KDF` has moved under an
+    account that already exists — `upgradeStoredKdf` in src/sync/account.tsx.
+
+    It is a re-wrap rather than a passphrase change: the auth key and its
+    parameters go back up exactly as they came down, and only the parameters
+    that made the encryption key, plus the blob that key wrapped, are new. The
+    vault is not touched at all, which is the point of wrapping a data key
+    rather than the vault itself.
+    """
+    session = enrol(client, mailbox, kdf=KDF)
+    token = session["token"]
+    ciphertext = blob(b"\x01the vault, which must survive this")
+    client.put(
+        "/v1/vault", json={"base_version": 0, "ciphertext": ciphertext}, headers=bearer(token)
+    )
+    assert session["kdf"] == KDF
+
+    rewrapped = base64.b64encode(b"the data key under a 64MiB scrypt key").decode()
+    rotated = client.put(
+        "/v1/keys",
+        json={
+            # The same key on both sides: nothing about the passphrase changed.
+            "current_auth_key": AUTH_KEY,
+            "new_auth_key": AUTH_KEY,
+            "kdf": SCRYPT_KDF,
+            "auth_kdf": AUTH_KDF,
+            "wrapped_passphrase": rewrapped,
+            # Unchanged. The recovery key runs through no KDF, so there is
+            # nothing on that side for a parameter change to invalidate.
+            "wrapped_recovery": WRAPPED_RECOVERY,
+        },
+        headers=bearer(token),
+    )
+    assert rotated.status_code == 200
+
+    # The client has to carry the new token: this endpoint ends every session it
+    # finds, including the one that called it.
+    new_token = rotated.json()["token"]
+    assert client.get("/v1/vault", headers=bearer(token)).status_code == 401
+    assert client.get("/v1/vault", headers=bearer(new_token)).json()["ciphertext"] == ciphertext
+
+    # The account is on the new parameters, and the old passphrase still signs
+    # in — which is the whole point of not having touched the auth key.
+    assert client.post("/v1/prelogin", json={"email": EMAIL}).json()["kdf"] == SCRYPT_KDF
+    back = sign_in(client, mailbox, auth_key=AUTH_KEY).json()
+    assert back["kdf"] == SCRYPT_KDF
+    assert back["wrapped_passphrase"] == rewrapped
+    assert back["wrapped_recovery"] == WRAPPED_RECOVERY
 
 
 def test_rotating_keys_requires_the_current_auth_key(client, mailbox):

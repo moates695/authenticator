@@ -27,6 +27,7 @@ import { fileURLToPath } from 'node:url';
 
 import { argon2idAsync } from '@noble/hashes/argon2.js';
 import { expand } from '@noble/hashes/hkdf.js';
+import { scryptAsync } from '@noble/hashes/scrypt.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { utf8ToBytes } from '@noble/hashes/utils.js';
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
@@ -97,13 +98,29 @@ function credentials() {
 
 // --- the app's key hierarchy, in four library calls -----------------------
 
-const stretch = (passphrase, salt, kdf) =>
-  argon2idAsync(utf8ToBytes(passphrase.normalize('NFKC')), salt, {
-    t: kdf.iterations,
-    m: kdf.memory_kib,
-    p: kdf.parallelism,
-    dkLen: KEY_BYTES,
-  });
+// Whichever algorithm `/v1/prelogin` names, since the two derivations are not
+// on the same one and an account seeded before the switch is still on Argon2id.
+// The branch mirrors `stretch` in src/sync/keys.ts; see there for why.
+const stretch = (passphrase, salt, kdf) => {
+  const password = utf8ToBytes(passphrase.normalize('NFKC'));
+  if (kdf.algorithm === 'scrypt') {
+    return scryptAsync(password, salt, {
+      N: (kdf.memory_kib * 1024) / (128 * kdf.block_size),
+      r: kdf.block_size,
+      p: kdf.parallelism,
+      dkLen: KEY_BYTES,
+    });
+  }
+  if (kdf.algorithm === 'argon2id') {
+    return argon2idAsync(password, salt, {
+      t: kdf.iterations,
+      m: kdf.memory_kib,
+      p: kdf.parallelism,
+      dkLen: KEY_BYTES,
+    });
+  }
+  throw new Error(`This script cannot derive keys with ${kdf.algorithm}.`);
+};
 
 const deriveAuthKey = (passphrase, email, kdf) =>
   stretch(passphrase, sha256(utf8ToBytes(`${AUTH_SALT_PREFIX}${email}`)), kdf);
@@ -185,6 +202,39 @@ async function call(url, path, body) {
   return payload;
 }
 
+/** `call`, for the endpoints that want a session as well as a body. */
+async function authed(url, method, path, token, body) {
+  const response = await fetch(`${url}${path}`, {
+    method,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`${method} ${path} → ${response.status}: ${text}`);
+  return text ? JSON.parse(text) : null;
+}
+
+/** Field-by-field, since these have been through JSON on the way here. */
+function sameParams(a, b) {
+  const keys = [...new Set([...Object.keys(a), ...Object.keys(b)])].sort();
+  return keys.every((key) => a[key] === b[key]);
+}
+
+/**
+ * The parameters the server hands a device for an address it has never seen,
+ * which are its current defaults. `/v1/prelogin` answers identically whether or
+ * not the account exists — that is what stops it being used to enumerate
+ * accounts — so asking about an address nobody has registered is a sound way to
+ * read the defaults, and there is no second endpoint that gives them.
+ *
+ * example.com rather than a reserved suffix like .invalid, which the server's
+ * email validation rejects outright. Thirty-two hex characters in front of it
+ * is not an address anyone has registered.
+ */
+function serverDefaults(url) {
+  return call(url, '/v1/prelogin', { email: `${randomBytes(16).toString('hex')}@example.com` });
+}
+
 /**
  * Both factors, with the fixed code standing in for the emailed one. Returns the
  * session body, whose wrapped keys are what the app would unwrap on a new
@@ -194,6 +244,75 @@ async function signIn(url, { email, passphrase, code }, authKdf) {
   const authKey = await deriveAuthKey(passphrase, email, authKdf);
   const challenge = await call(url, '/v1/login', { email, auth_key: b64(authKey) });
   return call(url, '/v1/verify', { challenge_id: challenge.challenge_id, code });
+}
+
+/**
+ * Moves an account that already exists onto the server's current derivation
+ * parameters, without changing the passphrase and without touching the vault.
+ *
+ * The same thing `upgradeStoredKdf` in src/sync/account.tsx does when a tester
+ * signs in, done here so an environment can be brought forward deliberately
+ * rather than waiting for someone to happen to sign in. It has to be a client:
+ * what the parameters protect is the data key wrapped under a key derived from
+ * the passphrase, and the server has never held either.
+ *
+ * Only the passphrase wrapping is rebuilt. The recovery wrapping goes back up
+ * byte for byte — no KDF runs on that side, so there is nothing there to be out
+ * of date — and so do the auth key and its parameters, since this is not a
+ * passphrase change and declaring parameters the stored key was not made under
+ * would lock the account out of `/v1/login`.
+ */
+async function upgradeExisting(url, { email, passphrase, code }, authKdf) {
+  const { kdf: target } = await serverDefaults(url);
+
+  const session = await signIn(url, { email, passphrase, code }, authKdf);
+  if (sameParams(session.kdf, target)) {
+    console.log(`Parameters  already ${describeKdf(target)}; nothing to do`);
+    return;
+  }
+  console.log(`Parameters  ${describeKdf(session.kdf)} → ${describeKdf(target)}`);
+
+  // Open it with what it was made under, which is the only thing that can.
+  const dataKey = unseal(
+    bytes(session.wrapped_passphrase),
+    await deriveEncryptionKey(passphrase, email, session.kdf),
+  );
+  const wrappedPassphrase = seal(dataKey, await deriveEncryptionKey(passphrase, email, target));
+  const authKey = await deriveAuthKey(passphrase, email, authKdf);
+
+  await authed(url, 'PUT', '/v1/keys', session.token, {
+    current_auth_key: b64(authKey),
+    new_auth_key: b64(authKey),
+    kdf: target,
+    auth_kdf: authKdf,
+    wrapped_passphrase: b64(wrappedPassphrase),
+    wrapped_recovery: session.wrapped_recovery,
+  });
+  console.log('Re-wrapped  the data key under the new parameters');
+
+  // The check that matters: sign in as a device that has never seen the
+  // account and open what came back. A re-wrap that stored something the new
+  // parameters do not reproduce would fail here rather than in a tester's hands.
+  const back = await signIn(url, { email, passphrase, code }, authKdf);
+  if (!sameParams(back.kdf, target)) throw new Error('The server did not keep the new parameters');
+  const reopened = unseal(
+    bytes(back.wrapped_passphrase),
+    await deriveEncryptionKey(passphrase, email, target),
+  );
+  if (b64(reopened) !== b64(dataKey)) throw new Error('The re-wrapped data key did not come back');
+
+  const stored = await fetch(`${url}/v1/vault`, {
+    headers: { Authorization: `Bearer ${back.token}` },
+  }).then((response) => response.json());
+  if (stored.ciphertext) {
+    JSON.parse(Buffer.from(unseal(bytes(stored.ciphertext), reopened)).toString());
+  }
+  console.log('Checked     signed in again, unwrapped the data key, opened the vault');
+}
+
+function describeKdf(kdf) {
+  const cost = kdf.algorithm === 'argon2id' ? `t=${kdf.iterations}` : `r=${kdf.block_size}`;
+  return `${kdf.algorithm} ${kdf.memory_kib / 1024}MiB ${cost}`;
 }
 
 async function main() {
@@ -229,10 +348,14 @@ async function main() {
     }
   }
 
-  const challenge = await call(url, '/v1/register', { email }).catch((err) => {
+  const challenge = await call(url, '/v1/register', { email }).catch(async (err) => {
     if (err.status === 409) {
-      console.log('\nThe account already exists on this server. Nothing to do.');
-      console.log('Pass --recreate to delete it and make it again, e.g. after a passphrase change.');
+      // Already there, so the job is to bring it forward rather than to make
+      // it. Re-creating would work too and would throw the vault away with it;
+      // this is what a real account gets, so it is what the tester gets.
+      console.log('\nThe account already exists on this server.');
+      await upgradeExisting(url, { email, passphrase, code }, authKdf);
+      console.log('\nPass --recreate to delete it and make it again instead.');
       process.exit(0);
     }
     throw err;

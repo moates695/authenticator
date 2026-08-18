@@ -3,11 +3,11 @@ import * as nobleUtils from '@noble/hashes/utils.js';
 /**
  * Keeping the app alive while a key is being derived.
  *
- * Argon2id is expensive on purpose, and there is nowhere else to run it: Hermes
- * has no JIT, Expo Go rules out a native implementation, and a worklet runtime
- * cannot reach an imported module. So it runs on the JS thread for as long as it
- * takes, and the only thing that keeps the app usable meanwhile is how often it
- * hands that thread back.
+ * A password KDF is expensive on purpose, and there is nowhere else to run it:
+ * Hermes has no JIT, Expo Go rules out a native implementation, and a worklet
+ * runtime cannot reach an imported module. So it runs on the JS thread for as
+ * long as it takes, and the only thing that keeps the app usable meanwhile is
+ * how often it hands that thread back.
  *
  * @noble/hashes has an async variant for exactly this, taking an `asyncTick` and
  * pausing between blocks. What it pauses with is:
@@ -27,9 +27,10 @@ import * as nobleUtils from '@noble/hashes/utils.js';
  * read-only live binding (a getter with no setter), so noble's `nextTick`
  * cannot be assigned over at runtime. Instead the `module-resolver` alias in
  * babel.config.js resolves every import of `@noble/hashes/utils.js` to
- * `noble_utils_shim.ts`, which re-exports the real module with `nextTick`
- * replaced by the throttled yield below. Jest reads the same babel config, so
- * the tests run against the same substitution the device does.
+ * `noble_utils_shim.ts`, which re-exports the real module with `nextTick` — and
+ * `asyncLoop`, the second way in, for the reasons under `throttledAsyncLoop` —
+ * replaced by the throttled versions below. Jest reads the same babel config,
+ * so the tests run against the same substitution the device does.
  *
  * The yield cannot be a naive one either, because of how noble decides when to
  * call it:
@@ -42,8 +43,8 @@ import * as nobleUtils from '@noble/hashes/utils.js';
  * costs nothing and this works out. A real yield does not: on a phone it is a
  * round trip through the native timer queue, tens of milliseconds, and once that
  * exceeds `asyncTick` every block after the first is over budget before it
- * starts. noble then pauses after every single block — 131072 of them at the
- * parameters in `keys.ts` — and a derivation that should take under a minute
+ * starts. noble then pauses after every single block — 262144 of them at the
+ * parameters in `keys.ts` — and a derivation that should take a few seconds
  * takes closer to an hour. Traded one freeze for a longer one.
  *
  * So the throttle lives here rather than in noble's accounting. However often
@@ -90,7 +91,43 @@ export async function throttledYield(): Promise<void> {
   resumedAt = Date.now();
 }
 
-type Yielding = { nextTick: () => Promise<void> };
+/**
+ * What noble's `asyncLoop` becomes, via the shim. `scryptAsync` drives its two
+ * main loops through this, and unlike `argon2idAsync` it cannot be reached by
+ * replacing an export: the original calls the `nextTick` local to utils.js, not
+ * the one imported from it.
+ *
+ * Same loop, with two differences. It pauses through `throttledYield`, so the
+ * thread is genuinely handed back at most once per budget however often this
+ * asks. And it takes a fresh clock reading after a pause rather than noble's
+ * `ts += diff`, which credits `ts` with the time up to the pause but not the
+ * pause itself — on a device, where a real yield costs tens of milliseconds,
+ * that leaves every following iteration over budget the moment it starts and
+ * turns the check below into a formality. The throttle would absorb it, but at
+ * a wasted microtask per iteration, and there are a quarter of a million of
+ * them.
+ */
+export async function throttledAsyncLoop(
+  iterations: number,
+  tick: number,
+  callback: (index: number) => void,
+): Promise<void> {
+  let ts = Date.now();
+  for (let index = 0; index < iterations; index++) {
+    callback(index);
+    // Date.now() is not monotonic; a clock that has gone backwards pauses
+    // rather than waiting out the difference, which is what noble does.
+    const held = Date.now() - ts;
+    if (held >= 0 && held < tick) continue;
+    await throttledYield();
+    ts = Date.now();
+  }
+}
+
+type Yielding = {
+  nextTick: () => Promise<void>;
+  asyncLoop: (iterations: number, tick: number, callback: (index: number) => void) => Promise<void>;
+};
 
 let installed: boolean | null = null;
 
@@ -106,22 +143,31 @@ let installed: boolean | null = null;
  * block to the last and freeze the app — worth a red test rather than a phone
  * that has to be force-quit.
  *
- * Only `argon2idAsync` is covered. `asyncLoop`, which noble's async scrypt and
- * pbkdf2 pause with, calls its module-local `nextTick` rather than the export,
- * so it does not see this — a second slow KDF here would need its own answer.
+ * Two entry points are covered, because the two KDFs in `keys.ts` pause through
+ * different ones. `argon2idAsync` imports `nextTick` from utils, so replacing
+ * that export reaches it. `scryptAsync` instead calls `asyncLoop`, which lives
+ * inside utils and pauses with its *module-local* `nextTick` — an export
+ * replacement cannot reach inside it. So the shim replaces `asyncLoop` itself
+ * with `throttledAsyncLoop` below, which is the same loop pausing through the
+ * same throttle. `pbkdf2Async` goes through `asyncLoop` too and so comes along
+ * for free.
  */
 export function installEventLoopYield(): boolean {
   if (installed !== null) return installed;
 
   const utils = nobleUtils as unknown as Yielding;
-  if (utils.nextTick === throttledYield) {
+  // Both, because which one a derivation pauses through depends on its
+  // algorithm: Argon2id reaches `nextTick`, scrypt reaches `asyncLoop`, and an
+  // account made under one may be signed into on a device deriving the other.
+  if (utils.nextTick === throttledYield && utils.asyncLoop === throttledAsyncLoop) {
     installed = true;
     return installed;
   }
 
   try {
     utils.nextTick = throttledYield;
-    installed = utils.nextTick === throttledYield;
+    utils.asyncLoop = throttledAsyncLoop;
+    installed = utils.nextTick === throttledYield && utils.asyncLoop === throttledAsyncLoop;
   } catch {
     installed = false;
   }

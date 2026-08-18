@@ -1,9 +1,11 @@
 import { argon2idAsync } from '@noble/hashes/argon2.js';
+import { scryptAsync } from '@noble/hashes/scrypt.js';
 import * as nobleUtils from '@noble/hashes/utils.js';
 
 import {
   YIELD_BUDGET_MS,
   installEventLoopYield,
+  throttledAsyncLoop,
   throttledYield,
   yieldToEventLoop,
 } from './js_thread';
@@ -69,6 +71,16 @@ describe('the babel alias', () => {
     // the length of an Argon2id derivation every time an account is created.
     expect((nobleUtils as unknown as { nextTick: unknown }).nextTick).toBe(throttledYield);
   });
+
+  it('replaces asyncLoop too, which is the way scrypt pauses', () => {
+    // The encryption key is derived with scrypt, and scrypt never touches
+    // `nextTick`: it calls `asyncLoop`, which pauses with utils' own module-
+    // local copy that no export substitution can reach. Replacing the loop
+    // itself is the only way in, so this is a separate assertion rather than a
+    // second helping of the one above — and the derivation it guards is the
+    // long one, on every sign-in.
+    expect((nobleUtils as unknown as { asyncLoop: unknown }).asyncLoop).toBe(throttledAsyncLoop);
+  });
 });
 
 describe('installing the yield', () => {
@@ -126,6 +138,61 @@ describe('throttling the yield', () => {
     }, 0);
 
     await nextTick();
+    expect(fired).toBe(true);
+  });
+});
+
+describe('a scrypt derivation on a device with slow timers', () => {
+  it('yields with the clock, not with the block count', async () => {
+    installEventLoopYield();
+
+    // 32MiB over a block size of 8 is N=32768, and scrypt sweeps its memory
+    // twice, so this is 65536 trips through the loop. Before `asyncLoop` was
+    // replaced there was nothing throttling them at all: noble's own accounting
+    // charges each pause to the block after it, so on 25ms timers every trip
+    // after the first is over budget and pauses. The cap fails in seconds
+    // rather than letting the suite sit through all 65536 of them.
+    const timers = withPhoneTimers(25, 60);
+
+    let derived: Uint8Array;
+    const started = Date.now();
+    try {
+      derived = await scryptAsync('a test passphrase', new Uint8Array(32), {
+        N: 32768,
+        r: 8,
+        p: 1,
+        dkLen: 32,
+        asyncTick: 20,
+      });
+    } finally {
+      timers.undo();
+    }
+
+    expect(derived).toHaveLength(32);
+
+    const elapsed = Date.now() - started;
+    expect(timers.yields()).toBeLessThanOrEqual(Math.ceil(elapsed / YIELD_BUDGET_MS) + 2);
+  });
+
+  it('lets a timer run part-way through, rather than only at the end', async () => {
+    installEventLoopYield();
+
+    let fired = false;
+    setTimeout(() => {
+      fired = true;
+    }, 0);
+
+    // Long enough to have to pause at least once. If it did not, this would be
+    // resolved with the timer still pending — an app that has repainted nothing
+    // since the sign-in button was pressed.
+    await scryptAsync('a test passphrase', new Uint8Array(32), {
+      N: 32768,
+      r: 8,
+      p: 1,
+      dkLen: 32,
+      asyncTick: YIELD_BUDGET_MS,
+    });
+
     expect(fired).toBe(true);
   });
 });
