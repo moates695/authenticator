@@ -180,6 +180,12 @@ than another passphrase and another several seconds of Argon2id.
 are held in memory only: killing the app mid-verification leaves nothing
 half-authenticated behind, at the cost of retyping the passphrase.
 
+One address is exempt from the email, so that app testers can get in without an
+inbox: the server's `TEST_ACCOUNT_EMAIL` names a single account that is always
+given `123456` and is never sent mail. Its passphrase is still checked, and the
+fixed code opens nothing else. `TESTER_ACCOUNT.md` has the credentials and what
+the exception costs.
+
 ### Staying signed in
 
 Both factors adopt a device; they are not asked for on the way to reading a code.

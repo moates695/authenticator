@@ -130,6 +130,9 @@ def make_client(database_url, mailbox):
         smtp_security="starttls",
         email_from="Authenticator <no-reply@example.com>",
         enable_docs=False,
+        # Off unless a test asks for it, so the fixed code is never quietly
+        # available to the rest of the suite.
+        test_account_email="",
     )
 
     pools = []

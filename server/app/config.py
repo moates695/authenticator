@@ -48,6 +48,13 @@ DEFAULT_AUTH_KDF: dict[str, object] = {
     "parallelism": 1,
 }
 
+# The code the tester account is always given, in every environment. It is a
+# constant rather than a setting on purpose: the address it applies to is
+# configuration, but what the code is should not be — a deployment cannot
+# quietly turn this into a different, less obvious digit string, and anyone
+# reading the environment can see exactly what it opens.
+TEST_ACCOUNT_CODE = "123456"
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -101,6 +108,18 @@ class Settings:
     email_from: str
     """Off in production: a public /docs on an auth service is an invitation to poke at it."""
     enable_docs: bool
+    """
+    One address whose second factor is `TEST_ACCOUNT_CODE` instead of an emailed
+    code, so app testers can sign in without an inbox. Empty — the default —
+    means there is no such address and every account is mailed.
+
+    Deliberately a single address rather than a pattern or a flag: this is the
+    one place the second factor is not really a second factor, and it should be
+    impossible to widen it by editing an environment variable. It is set in
+    development and in production alike, because a tester account that only
+    works on one of them is not a tester account. See TESTER_ACCOUNT.md.
+    """
+    test_account_email: str
 
 
 def _int_env(name: str, default: int) -> int:
@@ -161,4 +180,5 @@ def load_settings() -> Settings:
             "EMAIL_FROM", "Authenticator <no-reply@authenticator.moates.com.au>"
         ).strip(),
         enable_docs=os.environ.get("ENABLE_DOCS", "").strip() == "1",
+        test_account_email=os.environ.get("TEST_ACCOUNT_EMAIL", "").strip().lower(),
     )

@@ -54,6 +54,7 @@
     "test": "jest",
     "typecheck": "tsc --noEmit",
     "fixtures": "node scripts/test_fixtures.mjs",
+    "seed:tester": "node scripts/seed_tester_account.mjs",
     "fixtures:serve": "node scripts/serve_fixtures.mjs"
   },
   "jest": {

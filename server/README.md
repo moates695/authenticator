@@ -214,6 +214,18 @@ by a user.
 The cost is that `npm run server` will not start without an SMTP host — it says
 so and exits rather than booting into a server that cannot sign anyone in.
 
+The one address this does not hold for is the tester account, and it is the
+narrow version of the same idea done deliberately: `TEST_ACCOUNT_EMAIL` names a
+single address, that address is always given `123456` and is never sent mail,
+and the passphrase in front of it is checked as it is for anyone else. It is set
+to the same address in development and in production, because a tester account
+that works on only one of them is no use to a tester. What makes it a different
+proposition from `EMAIL_CONSOLE=1` is the shape: it cannot widen to a second
+account without an edit here, the digits are a constant in `app/config.py`
+rather than a setting, and the tests cover both what it opens and what it does
+not. `TESTER_ACCOUNT.md` in the repository root has the credentials and the
+whole of the reasoning.
+
 ### The sending account
 
 Gmail, which is enough for a handful of messages a day and needs no DNS work.

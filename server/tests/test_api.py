@@ -16,7 +16,7 @@ import re
 import threading
 import time
 
-from app.config import DEFAULT_AUTH_KDF, DEFAULT_KDF
+from app.config import DEFAULT_AUTH_KDF, DEFAULT_KDF, TEST_ACCOUNT_CODE
 from app.crypto import hash_auth_key
 from app.mail import MemoryMailer, SendFailed
 
@@ -34,6 +34,10 @@ WRAPPED_PASSPHRASE = base64.b64encode(b"data key wrapped under the passphrase").
 WRAPPED_RECOVERY = base64.b64encode(b"data key wrapped under the recovery key").decode()
 
 EMAIL = "marcus@example.com"
+
+# The tester account, and the code it is always given. The address is only
+# special to a server configured with it — see the section further down.
+TEST_ACCOUNT = "test@app.com"
 
 
 def register(client, email=EMAIL, ip=None):
@@ -96,6 +100,15 @@ def enrol(
         kdf=kdf,
         auth_kdf=auth_kdf,
     )
+    assert done.status_code == 200, done.text
+    return done.json()
+
+
+def enrol_tester(client) -> dict:
+    """`enrol` for the tester account, whose code is fixed rather than mailed."""
+    challenge = register(client, email=TEST_ACCOUNT)
+    assert challenge.status_code == 202, challenge.text
+    done = verify(client, challenge.json()["challenge_id"], TEST_ACCOUNT_CODE)
     assert done.status_code == 200, done.text
     return done.json()
 
@@ -335,6 +348,89 @@ def test_the_code_throttle_is_per_address(make_client, mailbox):
     assert register(client, email="one@example.com").status_code == 202
     assert register(client, email="one@example.com").status_code == 429
     assert register(client, email="two@example.com").status_code == 202
+
+
+# --- the tester account --------------------------------------------------
+#
+# One address, set by TEST_ACCOUNT_EMAIL, whose code is fixed and never sent. See
+# TESTER_ACCOUNT.md. What these check is that the exception is exactly as narrow
+# as it claims: the fixed code opens that address and nothing else, the
+# passphrase is still checked, and no mail goes out for it.
+
+
+def with_tester_account(make_client, **overrides):
+    """A client whose server has the tester address configured. Not `tester_client`:
+    pytest would collect anything starting with `test` as a test of its own."""
+    return make_client(test_account_email=TEST_ACCOUNT, **overrides)
+
+
+def test_the_tester_account_registers_with_the_fixed_code(make_client, mailbox):
+    client = with_tester_account(make_client)
+
+    challenge = register(client, email=TEST_ACCOUNT)
+    assert challenge.status_code == 202
+    assert mailbox.sent == []
+
+    done = verify(client, challenge.json()["challenge_id"], TEST_ACCOUNT_CODE)
+    assert done.status_code == 200, done.text
+    assert done.json()["token"]
+
+
+def test_the_tester_account_signs_in_with_the_fixed_code(make_client, mailbox):
+    client = with_tester_account(make_client)
+    enrol_tester(client)
+
+    challenge = login(client, email=TEST_ACCOUNT)
+    assert challenge.status_code == 200
+    assert mailbox.sent == []
+
+    done = verify(client, challenge.json()["challenge_id"], TEST_ACCOUNT_CODE)
+    assert done.status_code == 200, done.text
+
+
+def test_the_tester_account_still_needs_its_passphrase(make_client):
+    client = with_tester_account(make_client)
+    enrol_tester(client)
+
+    assert login(client, email=TEST_ACCOUNT, auth_key=WRONG_AUTH_KEY).status_code == 401
+
+
+def test_a_wrong_code_is_still_refused_for_the_tester_account(make_client):
+    client = with_tester_account(make_client)
+    enrol_tester(client)
+
+    challenge = login(client, email=TEST_ACCOUNT)
+    assert verify(client, challenge.json()["challenge_id"], "000000").status_code == 401
+
+
+def test_the_fixed_code_opens_no_other_account(make_client, mailbox):
+    client = with_tester_account(make_client)
+    enrol(client, mailbox)
+
+    challenge = login(client)
+    assert verify(client, challenge.json()["challenge_id"], TEST_ACCOUNT_CODE).status_code == 401
+
+
+def test_the_tester_address_is_ordinary_until_it_is_configured(client, mailbox):
+    """Without TEST_ACCOUNT_EMAIL the address is mailed a random code like any other."""
+    challenge = register(client, email=TEST_ACCOUNT)
+
+    assert mailbox.last.to == TEST_ACCOUNT
+    assert code_in(mailbox) != TEST_ACCOUNT_CODE
+    assert verify(client, challenge.json()["challenge_id"], TEST_ACCOUNT_CODE).status_code == 401
+
+
+def test_the_tester_account_is_not_charged_to_the_code_throttle(make_client, mailbox):
+    """
+    A tester signs in far more often than a real user, and no inbox is being
+    protected — the limit exists for mail that is never sent here.
+    """
+    client = with_tester_account(make_client, max_codes_per_email=1)
+
+    for _ in range(3):
+        assert register(client, email=TEST_ACCOUNT).status_code == 202
+    assert register(client, email="someone@example.com").status_code == 202
+    assert register(client, email="someone@example.com").status_code == 429
 
 
 def test_login_sends_a_code_instead_of_a_session(client, mailbox):

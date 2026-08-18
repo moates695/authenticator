@@ -23,6 +23,13 @@ that costs a moment rather than the several seconds the encryption key takes.
 That heavy derivation happens after `/v1/verify` has accepted the code, on the
 client, and this server never learns whether it succeeded.
 
+There is one documented exception, and it is deliberately narrow: the single
+address named by `TEST_ACCOUNT_EMAIL` is given a fixed code — `TEST_ACCOUNT_CODE`
+— and no mail is sent to it, so app testers can sign in without an inbox. Its
+passphrase is checked exactly as everyone else's is, so the account is a
+one-factor account rather than an open door, and it holds nothing but test data.
+TESTER_ACCOUNT.md in the repository root covers the trade.
+
 A session then slides rather than expiring on a fixed date: the device renews it
 through `/v1/session/refresh` whenever its owner passes the phone's own unlock
 check. Both factors are for adopting a device, not for using one.
@@ -45,7 +52,13 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, 
 from psycopg.errors import UniqueViolation
 
 from . import crypto, mail
-from .config import DEFAULT_AUTH_KDF, DEFAULT_KDF, Settings, load_settings
+from .config import (
+    DEFAULT_AUTH_KDF,
+    DEFAULT_KDF,
+    TEST_ACCOUNT_CODE,
+    Settings,
+    load_settings,
+)
 from .db import build_pool, init_db
 from .schemas import (
     AccountDeleteRequest,
@@ -246,7 +259,44 @@ def create_app(settings: Settings | None = None, mailer: mail.Mailer | None = No
                     headers={"Retry-After": str(settings.code_window_seconds)},
                 )
 
+    def is_test_account(email: str) -> bool:
+        """
+        Whether this is the tester account, whose code is fixed and never sent.
+
+        `email` is always normalised by the time it reaches here, and the setting
+        is normalised as it is read, so this is an exact match against one
+        address — never a prefix, a domain or a pattern. TESTER_ACCOUNT.md covers
+        what it is for and what it costs.
+        """
+        return bool(settings.test_account_email) and email == settings.test_account_email
+
+    def prepare_code(db: psycopg.Connection, request: Request, email: str, now: int) -> str:
+        """
+        The digits, and the throttle accounting that pays for sending them.
+        Counted before the send rather than after, so a provider having a bad day
+        cannot be used to hammer an address for free.
+
+        The tester account is charged nothing and given `TEST_ACCOUNT_CODE`: no
+        message goes out, so no inbox needs protecting from one, and a tester
+        signing in repeatedly must not run into a limit meant for real mail.
+        """
+        if is_test_account(email):
+            return TEST_ACCOUNT_CODE
+
+        check_send_throttle(db, email, client_ip(request), now)
+        code = crypto.new_verification_code()
+        record_event(db, CODE_SEND, f"email:{email}", now)
+        record_event(db, CODE_SEND, f"ip:{client_ip(request)}", now)
+        return code
+
     def deliver(email: str, code: str, purpose: str) -> None:
+        if is_test_account(email):
+            # The one address that is never mailed. Logged without the code —
+            # which is a published constant anyway — so that a sign-in nobody
+            # can account for is still visible in the log.
+            log.info("Tester account %s: no code sent, the fixed one applies.", email)
+            return
+
         try:
             mailer.send(
                 mail.verification_message(email, code, purpose, settings.code_ttl_seconds)
@@ -279,9 +329,7 @@ def create_app(settings: Settings | None = None, mailer: mail.Mailer | None = No
         asking for another code cannot stretch the flow past the half hour it
         started with.
         """
-        check_send_throttle(db, email, client_ip(request), now)
-
-        code = crypto.new_verification_code()
+        code = prepare_code(db, request, email, now)
         challenge_id = uuid.uuid4().hex
         expires_at = deadline or now + settings.challenge_ttl_seconds
         # A code handed out near the end of a challenge dies with it rather than
@@ -302,10 +350,6 @@ def create_app(settings: Settings | None = None, mailer: mail.Mailer | None = No
                 expires_at,
             ),
         )
-        # Counted before the send, so a provider having a bad day cannot be used
-        # to hammer an address for free.
-        record_event(db, CODE_SEND, f"email:{email}", now)
-        record_event(db, CODE_SEND, f"ip:{client_ip(request)}", now)
 
         try:
             deliver(email, code, purpose)
@@ -338,9 +382,7 @@ def create_app(settings: Settings | None = None, mailer: mail.Mailer | None = No
         per address, for the same reason `start_challenge` keeps one live code
         per account.
         """
-        check_send_throttle(db, email, client_ip(request), now)
-
-        code = crypto.new_verification_code()
+        code = prepare_code(db, request, email, now)
         challenge_id = uuid.uuid4().hex
         expires_at = deadline or now + settings.challenge_ttl_seconds
         code_expires_at = min(now + settings.code_ttl_seconds, expires_at)
@@ -351,8 +393,6 @@ def create_app(settings: Settings | None = None, mailer: mail.Mailer | None = No
             " created_at, code_expires_at, expires_at) VALUES (%s, %s, %s, 0, %s, %s, %s)",
             (challenge_id, email, crypto.hash_code(code), now, code_expires_at, expires_at),
         )
-        record_event(db, CODE_SEND, f"email:{email}", now)
-        record_event(db, CODE_SEND, f"ip:{client_ip(request)}", now)
 
         try:
             deliver(email, code, REGISTER)
