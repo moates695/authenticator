@@ -291,10 +291,14 @@ def create_app(settings: Settings | None = None, mailer: mail.Mailer | None = No
 
     def deliver(email: str, code: str, purpose: str) -> None:
         if is_test_account(email):
-            # The one address that is never mailed. Logged without the code —
-            # which is a published constant anyway — so that a sign-in nobody
-            # can account for is still visible in the log.
-            log.info("Tester account %s: no code sent, the fixed one applies.", email)
+            # The one address that is never mailed, and the one worth a line in
+            # the log: it is the account whose second factor is not really a
+            # second factor, so a sign-in nobody can account for should be
+            # visible. A warning rather than info because uvicorn leaves the root
+            # logger at WARNING, and an info here would be dropped — the code
+            # itself is a published constant, so there is nothing to keep out of
+            # the line.
+            log.warning("Tester account %s: no code sent, the fixed one applies.", email)
             return
 
         try:
