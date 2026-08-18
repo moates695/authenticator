@@ -6,9 +6,10 @@ padding, and the server validates only length — the contents are opaque to it.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, BaseModel, EmailStr, Field
+from pydantic import AfterValidator, BaseModel, EmailStr, Field, TypeAdapter
 
 from .crypto import AUTH_KEY_BYTES, CODE_DIGITS, InvalidBase64, decode_b64
 
@@ -56,13 +57,56 @@ ChallengeId = Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[0-9a
 Purpose = Literal["register", "login"]
 
 
-class KdfParams(BaseModel):
+class Argon2idParams(BaseModel):
     """Client-side Argon2id parameters. The server stores these but never runs them."""
 
     algorithm: Literal["argon2id"]
     memory_kib: int = Field(ge=8192, le=1024 * 1024)
     iterations: int = Field(ge=1, le=32)
     parallelism: int = Field(ge=1, le=16)
+
+
+class ScryptParams(BaseModel):
+    """
+    Client-side scrypt parameters, and what new accounts are made with — pure-JS
+    Argon2id is several times slower than pure-JS scrypt at equal memory, for
+    reasons set out in src/sync/keys.ts. Also stored and never run here.
+
+    `memory_kib` is the same quantity Argon2id states, so the two blocks stay
+    comparable; the client converts it to scrypt's `N` against `block_size`.
+    """
+
+    algorithm: Literal["scrypt"]
+    memory_kib: int = Field(ge=8192, le=1024 * 1024)
+    block_size: int = Field(ge=1, le=64)
+    parallelism: int = Field(ge=1, le=16)
+
+
+# Both, because an account keeps the algorithm it was made under: the ones from
+# before the switch are Argon2id and stay that way until their passphrase
+# changes. The server only stores whichever block it is handed and gives it back
+# at `/v1/prelogin`; deciding what to do with it is the client's problem.
+KdfParams = Annotated[
+    Argon2idParams | ScryptParams,
+    Field(discriminator="algorithm"),
+]
+
+# A discriminated union is a type, not a class, so a stored block cannot simply
+# be splatted into it the way a single model could. This is the equivalent: it
+# picks the variant off `algorithm` and validates against that one.
+_KDF_PARAMS = TypeAdapter(KdfParams)
+
+
+def parse_kdf_params(params: Mapping[str, object]) -> Argon2idParams | ScryptParams:
+    """
+    Turns a stored parameter block back into its model.
+
+    Raises `pydantic.ValidationError` on anything the client would not be able
+    to derive with — including an `algorithm` this version has never heard of,
+    which is worth failing on here rather than handing to a device as though it
+    were usable.
+    """
+    return _KDF_PARAMS.validate_python(params)
 
 
 class PreloginRequest(BaseModel):

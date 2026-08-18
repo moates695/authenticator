@@ -25,19 +25,24 @@ DATABASE_URL_ENV = "DATABASE_URL"
 # the expensive one; DEFAULT_AUTH_KDF makes the auth key this server checks, and
 # is light on purpose — it runs before `/v1/login`, so that a code is only ever
 # sent to an address whose passphrase was right, and the client would otherwise
-# be several seconds of Argon2id away from asking for one. What that costs is
-# explained in crypto.py: the scrypt over the auth key carries the difference.
+# be several seconds of key stretching away from asking for one. What that costs
+# is explained in crypto.py: the scrypt over the auth key carries the difference.
 #
 # These MUST match the client's own defaults in src/sync/keys.ts. /v1/prelogin
 # answers for unknown addresses with both blocks precisely so a stranger cannot
 # tell a registered account from an unregistered one — which only holds while the
 # decoy is indistinguishable from what a real registration would have stored.
-# The values are what pure-JS Argon2id under Hermes can carry without the unlock
-# becoming a wait: raise them on both sides together, never on one.
+# The values are what pure JS under Hermes can carry without the unlock becoming
+# a wait: raise them on both sides together, never on one. The encryption key
+# uses scrypt and the auth key Argon2id, which is not an oversight — see
+# src/sync/keys.ts, where the difference in cost between the two in JS is
+# measured and the reason for leaving the auth key alone is set out. Accounts
+# made before that switch keep their own stored blocks and are unaffected; these
+# two are only what a new account, and an unknown address, are answered with.
 DEFAULT_KDF: dict[str, object] = {
-    "algorithm": "argon2id",
-    "memory_kib": 32768,
-    "iterations": 4,
+    "algorithm": "scrypt",
+    "memory_kib": 65536,
+    "block_size": 8,
     "parallelism": 1,
 }
 

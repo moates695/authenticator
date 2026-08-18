@@ -38,7 +38,7 @@ import {
   type StoredSession,
 } from './account_policy';
 import * as api from './api';
-import { base64ToBytes } from './base64';
+import { base64ToBytes, bytesToBase64 } from './base64';
 import {
   AUTH_KDF,
   DEFAULT_KDF,
@@ -47,8 +47,10 @@ import {
   generateDataKey,
   generateRecoveryKey,
   recoveryWrappingKey,
+  sameKdf,
   unwrapDataKey,
   wrapDataKey,
+  type KdfParams,
 } from './keys';
 import { peekable, type Peekable } from './peekable';
 
@@ -101,7 +103,19 @@ type RegistrationMaterial = {
  * half-authenticated behind, and starting again costs a passphrase.
  */
 type PendingKeys =
-  | { purpose: 'login'; email: string; passphrase: string }
+  | {
+      purpose: 'login';
+      email: string;
+      passphrase: string;
+      /**
+       * Already derived, to satisfy `/v1/login`, and kept because a re-wrap
+       * needs the same key again as proof of the passphrase — deriving it a
+       * second time would be seconds of Argon2id for a value we are holding.
+       */
+      authKey: Uint8Array;
+      /** The account's own auth parameters, which a re-wrap must not change. */
+      authKdf: KdfParams;
+    }
   | { purpose: 'register'; email: string; material: Peekable<RegistrationMaterial> };
 
 type LoginKeys = Extract<PendingKeys, { purpose: 'login' }>;
@@ -472,7 +486,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
         // the vault has not been derived yet and cannot be until the code comes
         // back. It lives in memory for as long as the code is outstanding, and
         // goes when the challenge does.
-        beginVerification(challenge, { purpose: 'login', email, passphrase });
+        beginVerification(challenge, { purpose: 'login', email, passphrase, authKey, authKdf });
         return { ok: true };
       } catch (err) {
         setError(describe(err));
@@ -535,6 +549,72 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     [endVerification, persist],
   );
 
+  /**
+   * Moves an account onto today's derivation parameters, and is how a change to
+   * `DEFAULT_KDF` ever reaches an account that already exists.
+   *
+   * It cannot be done on the server. What the parameters protect is
+   * `wrapped_passphrase`, and re-wrapping means deriving a key from the
+   * passphrase — which the server has never held and never will. So the only
+   * moment it can happen is one where a device has the passphrase in hand and
+   * has just proved it: this one.
+   *
+   * Only the passphrase wrapping is rebuilt. The recovery wrapping goes back up
+   * exactly as it came down, because the key that opens it is 160 bits of
+   * machine randomness put through no KDF at all — there are no parameters on
+   * that side to be out of date, and the recovery key itself is on a piece of
+   * paper somewhere rather than on this device. The auth key and its parameters
+   * are likewise passed straight through: this is not a passphrase change, and
+   * declaring auth parameters the stored key was not made under would lock the
+   * account out of `/v1/login` for good.
+   *
+   * Returns the session to carry on with. `/v1/keys` ends every session it
+   * finds, this one included, and issues a fresh token — so the response is the
+   * only way back in, and it has to replace what the caller was holding. On any
+   * failure the original comes back untouched and the account stays on its old
+   * parameters, to be tried again at the next sign-in.
+   */
+  const upgradeStoredKdf = useCallback(
+    async (
+      verified: api.LoginResponse,
+      keys: LoginKeys,
+      dataKey: Uint8Array,
+    ): Promise<api.LoginResponse> => {
+      if (sameKdf(verified.kdf, DEFAULT_KDF)) return verified;
+
+      try {
+        // The user is through both factors and waiting on the vault either way,
+        // so this reports progress rather than running behind their back. It is
+        // one derivation, once, for the life of the account.
+        const encryptionKey = await derive(keys.email, keys.passphrase, DEFAULT_KDF);
+        const wrappedPassphrase = wrapDataKey(dataKey, encryptionKey);
+        const session = await api.putKeys(verified.token, {
+          currentAuthKey: keys.authKey,
+          newAuthKey: keys.authKey,
+          kdf: DEFAULT_KDF,
+          authKdf: keys.authKdf,
+          wrappedPassphrase,
+          wrappedRecovery: base64ToBytes(verified.wrapped_recovery),
+        });
+
+        return {
+          ...verified,
+          token: session.token,
+          expires_at: session.expires_at,
+          vault_version: session.vault_version,
+          kdf: DEFAULT_KDF,
+          wrapped_passphrase: bytesToBase64(wrappedPassphrase),
+        };
+      } catch {
+        // Nothing here is worth interrupting a sign-in that has otherwise
+        // worked. The data key is unchanged, the vault is unchanged, and the
+        // account opens on its old parameters exactly as it did a moment ago.
+        return verified;
+      }
+    },
+    [derive],
+  );
+
   const completeSignIn = useCallback(
     async (verified: api.LoginResponse, keys: LoginKeys): Promise<SignInOutcome> => {
       // Both factors are in. This is where the slow derivation finally runs —
@@ -568,7 +648,12 @@ export function AccountProvider({ children }: { children: ReactNode }) {
         return { ok: false, reason: 'error' };
       }
 
-      const remote = await api.getVault(verified.token);
+      // The passphrase has now opened the account, which is the one moment a
+      // re-wrap is possible. Everything below works from what comes back: if it
+      // did upgrade, the token `verified` was holding has just been retired.
+      const current = await upgradeStoredKdf(verified, keys, dataKey);
+
+      const remote = await api.getVault(current.token);
       const remoteVault = remote.ciphertext
         ? decryptVault(base64ToBytes(remote.ciphertext), dataKey)
         : null;
@@ -578,7 +663,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       const differentDevice = !localKey || !equalBytes(localKey, dataKey);
 
       const ready: PendingAdoption = {
-        verified,
+        verified: current,
         email: keys.email,
         dataKey,
         remoteVault,
@@ -597,7 +682,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
 
       return adopt(ready);
     },
-    [adopt, derive, endVerification],
+    [adopt, derive, endVerification, upgradeStoredKdf],
   );
 
   const submitCode = useCallback(

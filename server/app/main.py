@@ -63,7 +63,6 @@ from .db import build_pool, init_db
 from .schemas import (
     AccountDeleteRequest,
     ChallengeResponse,
-    KdfParams,
     KeysPutRequest,
     LoginRequest,
     LoginResponse,
@@ -77,6 +76,7 @@ from .schemas import (
     VaultPutResponse,
     VaultResponse,
     VerifyRequest,
+    parse_kdf_params,
 )
 
 API_PREFIX = "/v1"
@@ -452,7 +452,7 @@ def create_app(settings: Settings | None = None, mailer: mail.Mailer | None = No
             user_id=user_id,
             token=token,
             expires_at=expires_at,
-            kdf=KdfParams(**json.loads(user["kdf_params"])),
+            kdf=parse_kdf_params(json.loads(user["kdf_params"])),
             wrapped_passphrase=user["wrapped_passphrase"],
             wrapped_recovery=user["wrapped_recovery"],
             vault_version=vault_version(db, user_id),
@@ -483,7 +483,9 @@ def create_app(settings: Settings | None = None, mailer: mail.Mailer | None = No
         # defaults here are simply the answer that gives nothing away.
         stored_auth = row["auth_kdf_params"] if row else None
         auth_params = json.loads(stored_auth) if stored_auth else DEFAULT_AUTH_KDF
-        return PreloginResponse(kdf=KdfParams(**params), auth_kdf=KdfParams(**auth_params))
+        return PreloginResponse(
+            kdf=parse_kdf_params(params), auth_kdf=parse_kdf_params(auth_params)
+        )
 
     @app.post(
         f"{API_PREFIX}/register",
