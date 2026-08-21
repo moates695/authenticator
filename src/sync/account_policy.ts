@@ -7,6 +7,8 @@
  * so the app does not open until there is somewhere for them to be backed up.
  */
 
+import type { KdfParams } from './keys';
+
 /**
  * Long enough that Argon2id has something to defend, short enough that people
  * will actually pick one they can remember. There is no reset: this passphrase
@@ -139,7 +141,7 @@ export function passphraseProblem(passphrase: string, confirmation?: string): st
 
 /**
  * The emailed second factor. Six digits, because that is what people will
- * retype off a screen; the server holds it to five minutes and a handful of
+ * retype off a screen; the server holds it to fifteen minutes and a handful of
  * guesses, which is what makes six enough.
  */
 export const VERIFICATION_CODE_LENGTH = 6;
@@ -160,8 +162,9 @@ export function isCompleteCode(raw: string): boolean {
 /**
  * A challenge in flight: the server has sent a code and is waiting for it.
  *
- * The keys derived on the way here are held separately, in memory only. This
- * is the part the screen is allowed to see.
+ * The keys derived on the way here are held separately — see `StoredPending`
+ * for the little of that which outlives the process. This is the part the
+ * screen is allowed to see.
  */
 export type PendingVerification = {
   challengeId: string;
@@ -258,6 +261,101 @@ export function parseStoredSession(raw: string | null): StoredSession | null {
     typeof refreshed_at === 'number' && Number.isFinite(refreshed_at) ? refreshed_at : 0;
 
   return { token, expires_at, refreshed_at: refreshed };
+}
+
+/**
+ * A challenge kept where it can outlive the process, so an app killed while the
+ * user was in their inbox comes back to the code screen instead of to the gate,
+ * with a code in that inbox that now answers nothing.
+ *
+ * It holds the passphrase, which is the part worth being uncomfortable about.
+ * What bounds it is that the record is short-lived by construction — written
+ * when the code goes out, deleted the moment the challenge ends either way, and
+ * refused below once the challenge's own half hour is up — and that it sits in
+ * the same keystore as the vault's data key, so nothing can read it that could
+ * not already read the codes the account exists to protect.
+ *
+ * Only what cannot be rebuilt is kept. A registration's key material is several
+ * seconds of scrypt and is simply derived again on the way back; a sign-in's
+ * auth key is kept because it was derived under parameters this record is the
+ * only local copy of, and because it is the passphrase's own product rather
+ * than anything more.
+ */
+export type StoredPending =
+  | { purpose: 'register'; challenge: PendingVerification; passphrase: string }
+  | {
+      purpose: 'login';
+      challenge: PendingVerification;
+      passphrase: string;
+      /** Standard base64, as the rest of the wire format uses. */
+      authKey: string;
+      /** The account's own auth parameters, which a re-wrap must not change. */
+      authKdf: KdfParams;
+    };
+
+/**
+ * Reads a stored challenge back, or null when there is nothing usable there.
+ *
+ * `nowSeconds` is what makes this more than a shape check. Past its deadline the
+ * server has forgotten the challenge, so restoring it would put the user in
+ * front of a code field that cannot be satisfied; the gate is the honest answer.
+ */
+export function parseStoredPending(raw: string | null, nowSeconds: number): StoredPending | null {
+  const parsed = parseJson(raw);
+  if (!parsed) return null;
+
+  const { challenge, passphrase, authKey, authKdf } = parsed as {
+    challenge?: unknown;
+    passphrase?: unknown;
+    authKey?: unknown;
+    authKdf?: unknown;
+  };
+  if (typeof passphrase !== 'string' || !passphrase) return null;
+
+  const pending = parsePendingVerification(challenge);
+  if (!pending || pending.expiresAt <= nowSeconds) return null;
+
+  if (pending.purpose === 'register') {
+    return { purpose: 'register', challenge: pending, passphrase };
+  }
+
+  // A sign-in without these could still answer its code, but it could not
+  // re-wrap afterwards, and half a record is not worth guessing at.
+  const kdf = parseKdfParams(authKdf);
+  if (typeof authKey !== 'string' || !authKey || !kdf) return null;
+  return { purpose: 'login', challenge: pending, passphrase, authKey, authKdf: kdf };
+}
+
+function parsePendingVerification(value: unknown): PendingVerification | null {
+  if (typeof value !== 'object' || value === null) return null;
+
+  const { challengeId, email, purpose, codeExpiresAt, expiresAt } =
+    value as Partial<PendingVerification>;
+  if (typeof challengeId !== 'string' || !challengeId) return null;
+  if (typeof email !== 'string' || !email) return null;
+  if (purpose !== 'register' && purpose !== 'login') return null;
+  if (typeof codeExpiresAt !== 'number' || !Number.isFinite(codeExpiresAt)) return null;
+  if (typeof expiresAt !== 'number' || !Number.isFinite(expiresAt)) return null;
+
+  return { challengeId, email, purpose, codeExpiresAt, expiresAt };
+}
+
+/**
+ * Enough of a shape check to know the block came from us. What the numbers mean
+ * is the derivation's business; all this has to do is keep a corrupt record from
+ * being handed on as though it were parameters.
+ */
+function parseKdfParams(value: unknown): KdfParams | null {
+  if (typeof value !== 'object' || value === null) return null;
+
+  const kdf = value as Record<string, unknown>;
+  const positive = (field: unknown) =>
+    typeof field === 'number' && Number.isFinite(field) && field > 0;
+  if (!positive(kdf.memory_kib) || !positive(kdf.parallelism)) return null;
+
+  if (kdf.algorithm === 'argon2id' && positive(kdf.iterations)) return value as KdfParams;
+  if (kdf.algorithm === 'scrypt' && positive(kdf.block_size)) return value as KdfParams;
+  return null;
 }
 
 function parseJson(raw: string | null): unknown {

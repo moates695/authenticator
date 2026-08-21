@@ -25,7 +25,7 @@ TOKEN_BYTES = 32
 
 # Six digits is what people will retype off a phone screen without resenting it.
 # A million possibilities is not much on its own, which is why the code is only
-# ever the second factor, lives five minutes, and dies after a few wrong guesses.
+# ever the second factor, lives fifteen minutes, and dies after a few wrong guesses.
 CODE_DIGITS = 6
 
 # 64MiB and a couple of hundred milliseconds per verification. The digest is
@@ -119,7 +119,7 @@ def hash_code(code: str) -> str:
     """
     A plain digest, not scrypt. Six digits fall to a dictionary of a million
     entries whatever the parameters, so this is not what stops an attacker who
-    has the database — the attempt cap and the five minute life are. What it
+    has the database — the attempt cap and the fifteen minute life are. What it
     does buy is that a backup, a log line or a stray query result does not hand
     over a live code in the clear.
     """

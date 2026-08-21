@@ -292,7 +292,7 @@ def test_a_new_code_replaces_the_one_before_it(client, mailbox):
 
 def test_a_new_code_can_be_asked_for_after_the_old_one_expires(make_client, mailbox):
     """
-    The challenge outlives the code deliberately. Otherwise a five minute expiry
+    The challenge outlives the code deliberately. Otherwise an expired code
     would cost the user a passphrase and several seconds of Argon2id to get past.
     """
     client = make_client(code_ttl_seconds=0)
@@ -461,6 +461,43 @@ def test_verifying_a_login_returns_the_wrapped_keys(client, mailbox):
     assert body["wrapped_passphrase"] == WRAPPED_PASSPHRASE
     assert body["wrapped_recovery"] == WRAPPED_RECOVERY
     assert body["kdf"] == KDF
+
+
+def test_signing_in_again_kills_the_code_before_it(client, mailbox):
+    """
+    One live code per account on the sign-in path, the same as on the
+    registration one. Without it a user who tapped sign in twice would leave a
+    stack of codes behind, each good until it aged out, and the longer expiry
+    would be a longer window for every one of them.
+    """
+    enrol(client, mailbox)
+
+    first = login(client).json()["challenge_id"]
+    first_code = code_in(mailbox)
+    second = login(client).json()["challenge_id"]
+    second_code = code_in(mailbox)
+    assert first_code != second_code
+
+    # The earlier challenge is gone, so its code has nothing left to answer.
+    assert verify(client, first, first_code).status_code == 410
+    assert verify(client, second, first_code).status_code == 401
+    assert verify(client, second, second_code).status_code == 200
+
+
+def test_a_resent_sign_in_code_replaces_the_one_before_it(client, mailbox):
+    enrol(client, mailbox)
+
+    challenge = login(client).json()["challenge_id"]
+    first_code = code_in(mailbox)
+
+    again = resend(client, challenge)
+    assert again.status_code == 200
+    second_code = code_in(mailbox)
+    assert first_code != second_code
+
+    assert verify(client, challenge, first_code).status_code == 410
+    assert verify(client, again.json()["challenge_id"], first_code).status_code == 401
+    assert verify(client, again.json()["challenge_id"], second_code).status_code == 200
 
 
 def test_a_session_is_refused_while_the_address_is_unverified(client, mailbox, db):
@@ -921,6 +958,32 @@ def test_registration_throttle_is_per_address(make_client):
     assert register(client, email="one@example.com", ip="10.0.0.1").status_code == 202
     assert register(client, email="two@example.com", ip="10.0.0.1").status_code == 429
     assert register(client, email="three@example.com", ip="10.0.0.2").status_code == 202
+
+
+def test_registration_throttle_does_not_strand_a_pending_address(make_client, mailbox):
+    """
+    The code went out and never came back — the app was killed while its owner
+    was reading it, which is the common way for a sign-up to be interrupted.
+    Asking for another one is the same registration restarted, so the cap on new
+    accounts from one address is not what should stand in the way of it.
+    """
+    client = make_client(max_registrations_per_ip=1)
+    assert register(client, email="one@example.com", ip="10.0.0.1").status_code == 202
+
+    # The cap is reached: a second address from here is refused.
+    assert register(client, email="two@example.com", ip="10.0.0.1").status_code == 429
+
+    # The first one can still be picked up where it was left, with whatever
+    # passphrase is given this time.
+    again = register(client, email="one@example.com", ip="10.0.0.1")
+    assert again.status_code == 202
+    done = verify(client, again.json()["challenge_id"], code_in(mailbox), auth_key=NEW_AUTH_KEY)
+    assert done.status_code == 200, done.text
+    assert login(client, email="one@example.com", auth_key=NEW_AUTH_KEY).status_code == 200
+
+    # The exemption went with the pending row it was for: there is nothing left
+    # to resume, so the cap answers again.
+    assert register(client, email="one@example.com", ip="10.0.0.1").status_code == 429
 
 
 def test_a_failed_registration_still_counts_towards_the_throttle(make_client, mailbox):

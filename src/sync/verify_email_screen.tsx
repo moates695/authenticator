@@ -131,8 +131,16 @@ export function VerifyEmailScreen() {
   const pending = account.pendingVerification;
 
   const [code, setCode] = useState('');
-  /** Epoch ms. Moved forward every time a code goes out. */
-  const [resendReadyAt, setResendReadyAt] = useState(() => Date.now() + RESEND_COOLDOWN_MS);
+  /**
+   * Epoch ms. Moved forward every time a code goes out.
+   *
+   * A challenge restored after the app was killed may be holding a code that
+   * has already run out, and there is no tap storm to guard against on a code
+   * that answers nothing — so that one starts ready rather than held.
+   */
+  const [resendReadyAt, setResendReadyAt] = useState(() =>
+    pending && pending.codeExpiresAt > nowSeconds() ? Date.now() + RESEND_COOLDOWN_MS : 0,
+  );
   /** How many codes signing in would overwrite, while the user decides. */
   const [replacing, setReplacing] = useState<number | null>(null);
 

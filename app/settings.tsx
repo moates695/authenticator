@@ -5,6 +5,7 @@ import { useAppLock } from '@/auth/lock';
 import { ConfirmDialog } from '@/components/dialog';
 import { useAccount } from '@/sync/account';
 import { SYNC_BASE_URL } from '@/sync/api';
+import { DeleteAccountDialog } from '@/sync/delete_account_dialog';
 import { useTheme, type ThemePreference } from '@/theme/theme_context';
 import { useVault } from '@/vault/vault_store';
 
@@ -15,6 +16,7 @@ export default function SettingsScreen() {
   const account = useAccount();
 
   const [signingOut, setSigningOut] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   // A device with nothing enrolled has no check to offer, and a build with the
   // testing override set ignores the preference either way. Both leave the row
@@ -150,6 +152,29 @@ export default function SettingsScreen() {
         </Text>
       </Section>
 
+      <Section title="Danger zone">
+        <Pressable
+          onPress={() => setDeleting(true)}
+          style={({ pressed }) => ({
+            alignItems: 'center',
+            paddingVertical: spacing.md,
+            borderRadius: radius.md,
+            borderWidth: StyleSheet.hairlineWidth,
+            borderColor: colors.danger,
+            backgroundColor: pressed ? colors.surfaceAlt : 'transparent',
+          })}
+          accessibilityRole="button"
+        >
+          <Text style={{ color: colors.danger, fontSize: 15, fontWeight: '600' }}>
+            Delete account
+          </Text>
+        </Pressable>
+        <Text style={{ color: colors.textFaint, fontSize: 12, lineHeight: 18 }}>
+          Closes the account and erases the backup from the server, taking the codes on this device
+          with it. Signing out instead leaves both where they are.
+        </Text>
+      </Section>
+
       <ConfirmDialog
         visible={signingOut}
         title="Sign out?"
@@ -164,6 +189,8 @@ export default function SettingsScreen() {
           void account.signOut();
         }}
       />
+
+      <DeleteAccountDialog visible={deleting} onClose={() => setDeleting(false)} />
     </ScrollView>
   );
 }

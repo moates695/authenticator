@@ -15,8 +15,8 @@ pass is deliberately light — it runs before `/v1/login` will send a code, so t
 user is waiting on it — which makes this the larger half of what a passphrase
 guess costs anyone who takes this database.
 
-The SMTP password is the only secret here, and it opens a mailbox rather than a
-vault. There is still no server-side key that can decrypt anything a user stored.
+The Gmail refresh token is the only secret here, and it opens a mailbox rather
+than a vault. There is still no server-side key that can decrypt anything a user stored.
 
 Registration is open. The guardrails are a per-IP registration throttle, a per-IP
 and per-email login throttle, a per-address cap on how many codes can be sent, a
@@ -44,12 +44,12 @@ device after `/v1/verify` has accepted the code, and this server never sees it.
 
 The rules on a code:
 
-- **Six digits, five minutes, one use.** Verifying deletes it. Issuing one
+- **Six digits, fifteen minutes, one use.** Verifying deletes it. Issuing one
   deletes whatever was outstanding for that account, so an address never has two
   live codes.
 - **Five wrong guesses** destroy the challenge — the real defence, since a
   million possibilities is not much on its own.
-- **The challenge outlives the code**, half an hour against five minutes, so a
+- **The challenge outlives the code**, half an hour against fifteen minutes, so a
   code that expires while the user is looking for it costs a `resend` rather
   than another passphrase and another Argon2id run.
 - **A registration nobody confirmed can be registered over.** Until its code
@@ -156,7 +156,7 @@ Then, from the repo root:
 npm run server
 ```
 
-which is `deploy/dev_server.py`: it reads `.env` for the SMTP credentials, works
+which is `deploy/dev_server.py`: it reads `.env` for the Gmail credentials, works
 out the local database address, turns `/docs` on and execs uvicorn on
 `0.0.0.0:8000`.
 
@@ -167,7 +167,7 @@ so a one-off run against other settings needs no edit to the file:
 
 ```bash
 cd server
-SMTP_USERNAME=other@gmail.com uv run python deploy/dev_server.py
+EMAIL_FROM=other@gmail.com uv run python deploy/dev_server.py
 ```
 
 `DATABASE_URL` is the one exception: `.env` carries the droplet's, which names a
@@ -222,8 +222,10 @@ noticed if that variable were set somewhere it should not be. Development uses
 the real account, which also means spam placement gets noticed here rather than
 by a user.
 
-The cost is that `npm run server` will not start without an SMTP host — it says
-so and exits rather than booting into a server that cannot sign anyone in.
+The cost is that `npm run server` will not start without the Gmail credentials —
+it says so and exits rather than booting into a server that cannot sign anyone
+in. Development sends over the same API production does, so a code that arrives
+here is a code that will arrive there.
 
 The one address this does not hold for is the tester account, and it is the
 narrow version of the same idea done deliberately: `TEST_ACCOUNT_EMAIL` names a
@@ -239,28 +241,72 @@ whole of the reasoning.
 
 ### The sending account
 
-Gmail, which is enough for a handful of messages a day and needs no DNS work.
-Three things about it are not obvious.
+Gmail, which is enough for a handful of messages a day and needs no DNS work —
+but over its HTTP API rather than SMTP, and that part is not a preference.
 
-It will not accept the account password. Turn on 2-Step Verification, then take a
-16-character **app password** from
-[myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)
-and strip its spaces — that is what `SMTP_PASSWORD` holds. If 2-Step Verification
-is set up with security keys only, the app password option does not appear at
-all, so leave a phone or an authenticator enrolled as well.
+**Why not SMTP.** The droplet's provider blocks outbound 25, 465 and 587. Not
+just to Google: to every host, which is what distinguishes it from a credential
+problem. Port 443 is open, so `/v1/register` used to spend the SMTP timeout
+going nowhere and then answer `502`, while `/health` stayed green — the server
+was fine, and only the one thing it needs the network for was not. Anything that
+sends over SMTP from this box will hit the same wall, so a different SMTP
+provider is not a fix; an HTTP API is.
 
-It rewrites the `From` header. Gmail sends as the authenticated account unless
-the address in `EMAIL_FROM` is a verified *Send mail as* alias, and verifying one
-means receiving a confirmation code at it — so
+Confirming it, if this is ever in doubt again:
+
+```bash
+# 443 to anywhere: fine. 587 to anywhere, including a non-Google host: hangs.
+timeout 6 bash -c 'cat < /dev/null > /dev/tcp/1.1.1.1/443'          && echo ok
+timeout 6 bash -c 'cat < /dev/null > /dev/tcp/smtp.gmail.com/587'   || echo blocked
+```
+
+**Setting the credentials up.** Once, in the [Google Cloud
+console](https://console.cloud.google.com), signed in as whoever should own the
+project:
+
+1. A project, with the **Gmail API** enabled.
+2. An **OAuth consent screen**, External, published to **In production**. This
+   one matters: left in *Testing*, Google expires every refresh token after
+   seven days, and codes stop about a week after everything looked finished.
+3. An **OAuth client**, type **Desktop app**. Its id and secret are
+   `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`.
+
+Then mint the grant, on a machine with a browser, **signed in as the sending
+mailbox** rather than as the project's owner — the client identifies the app, and
+this step is what makes it that particular mailbox:
+
+```bash
+cd server
+uv run python deploy/google_oauth_token.py
+```
+
+Expect a **"Google hasn't verified this app"** screen on the way through. That
+is this app, unverified because it has one user, and verification is not
+something to go and get — it exists so that *strangers* can trust an app. Get
+past it with **Advanced**, at the bottom left, then **Go to …**. Do not click the
+developer address in the middle of that page: it is a `mailto:` link, and on
+Windows it opens Outlook and asks for a Microsoft sign-in, which looks alarming
+and has nothing to do with any of this.
+
+It prints the three values to paste into `.env`. The scope it asks for is
+`gmail.send` and nothing else, so the token cannot read the mailbox it sends
+from. Re-running it is safe and is the fix if the token is lost or revoked; the
+old one keeps working until it is revoked at
+[myaccount.google.com/permissions](https://myaccount.google.com/permissions).
+
+**It still rewrites the `From` header.** Gmail sends as the mailbox the refresh
+token belongs to unless `EMAIL_FROM` is a verified *Send mail as* alias of it,
+and verifying one means receiving a confirmation code at it — so
 `no-reply@authenticator.moates.com.au` needs mail to be receivable on that domain
 first. Until then `EMAIL_FROM` should carry the Gmail address, so that the header
-and the envelope agree rather than one being silently replaced.
+and the envelope agree rather than one being silently replaced. This is the same
+constraint the app password had; the transport changed, the mailbox rules did not.
 
-And the account should be a dedicated one. The app password is a whole-mailbox
-credential sitting in `.env` on the droplet, which is not something to hand out
-on behalf of a personal inbox. Its own second factor should be somewhere other
-than this app: if a bad deploy ever breaks sign-in, the recovery path should not
-run through the mailbox that is down.
+**And the account should be a dedicated one.** The refresh token is a sending
+credential for a whole mailbox sitting in `.env` on the droplet, which is not
+something to hand out on behalf of a personal inbox. Its own second factor should
+be somewhere other than this app: if a bad deploy ever breaks sign-in, the
+recovery path should not run through the mailbox that is down.
 
 To check the credentials without standing a server up:
 
@@ -272,10 +318,14 @@ uv run python deploy/send_test_email.py --to me@elsewhere.example
 
 It reads the same `.env` docker compose hands the container and sends the real
 template with a placeholder code, so it answers both of the questions a test send
-is for: whether the login is accepted, and which folder the result lands in. A
-consumer Gmail has no sending reputation for transactional mail, so spam
-placement is worth looking at before trusting it. Swapping the four `SMTP_*`
-values for a transactional provider later needs no code change.
+is for: whether the credentials are accepted, and which folder the result lands
+in. A consumer Gmail has no sending reputation for transactional mail, so spam
+placement is worth looking at before trusting it.
+
+The two failures worth recognising: `invalid_grant` from the token endpoint means
+the refresh token has expired or been revoked — nearly always the consent screen
+left in *Testing* — and a `403` on the send means the Gmail API is not enabled on
+the project.
 
 ## Deploying to the droplet
 
@@ -353,6 +403,12 @@ curl -s https://authenticator.moates.com.au/health
 
 ## Ops notes
 
+- **Outbound SMTP is blocked, and cannot be unblocked from here.** The provider
+  drops 25, 465 and 587 to every host. That is why codes go over the Gmail HTTP
+  API — see "The sending account". Worth knowing before adding anything else to
+  this box that sends mail: it will need an HTTP API too, and the symptom is a
+  timeout rather than a refusal, so it looks like a hung request and not a
+  network policy.
 - **Rate limiting is nginx-only, not fail2ban.** As documented on the
   `vault.moates.com.au` block, this service is Dockerised (published ports are
   DNAT'd past the INPUT chain) and Cloudflare-proxied (the packet source is the CF

@@ -96,15 +96,14 @@ def mailbox() -> MemoryMailer:
 
 
 @pytest.fixture
-def make_client(database_url, mailbox):
+def settings() -> Settings:
     """
-    Builds a client with production-shaped defaults. Pass overrides to exercise a
-    limit without waiting for the real one, e.g. `make_client(max_login_attempts=2)`,
-    or `mailer=` to stand in a sender that fails. Two clients from the same test
-    share the database, which is how a restart is simulated.
+    Production-shaped defaults, with a placeholder database. `make_client` puts
+    the real URL in; tests that need no database — the mailer's, for one — take
+    this directly and skip standing a schema up.
     """
-    base = Settings(
-        database_url=database_url,
+    return Settings(
+        database_url="postgresql://placeholder/placeholder",
         # One connection each. A test makes its requests one at a time, and a
         # test that builds several clients would otherwise hold a pool per client
         # against a server with a default of 100.
@@ -117,23 +116,32 @@ def make_client(database_url, mailbox):
         login_attempt_window_seconds=900,
         max_registrations_per_ip=5,
         registration_window_seconds=3600,
-        code_ttl_seconds=300,
+        code_ttl_seconds=900,
         challenge_ttl_seconds=1800,
         max_code_attempts=5,
         max_codes_per_email=5,
         max_codes_per_ip=20,
         code_window_seconds=900,
-        smtp_host="smtp.example.com",
-        smtp_port=587,
-        smtp_username="",
-        smtp_password="",
-        smtp_security="starttls",
+        google_client_id="test-client-id.apps.googleusercontent.com",
+        google_client_secret="test-client-secret",
+        google_refresh_token="test-refresh-token",
         email_from="Authenticator <no-reply@example.com>",
         enable_docs=False,
         # Off unless a test asks for it, so the fixed code is never quietly
         # available to the rest of the suite.
         test_account_email="",
     )
+
+
+@pytest.fixture
+def make_client(database_url, mailbox, settings):
+    """
+    Builds a client with production-shaped defaults. Pass overrides to exercise a
+    limit without waiting for the real one, e.g. `make_client(max_login_attempts=2)`,
+    or `mailer=` to stand in a sender that fails. Two clients from the same test
+    share the database, which is how a restart is simulated.
+    """
+    base = replace(settings, database_url=database_url)
 
     pools = []
 

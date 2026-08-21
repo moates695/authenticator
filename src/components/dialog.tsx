@@ -71,8 +71,14 @@ export function DialogTitle({ children }: { children: React.ReactNode }) {
   return <Text style={{ color: colors.text, fontSize: 16, fontWeight: '600' }}>{children}</Text>;
 }
 
-/** The row of text actions along the bottom of a dialog. */
-function DialogActions({ children }: { children: React.ReactNode }) {
+/**
+ * The row of text actions along the bottom of a dialog.
+ *
+ * Exported along with `DialogAction` for the dialogs that cannot be built out
+ * of the ready-made ones below — anything wanting a field from `form.tsx`, which
+ * imports this module and so cannot be imported back into it.
+ */
+export function DialogActions({ children }: { children: React.ReactNode }) {
   const { spacing } = useTheme();
   return (
     <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: spacing.lg }}>
@@ -81,7 +87,7 @@ function DialogActions({ children }: { children: React.ReactNode }) {
   );
 }
 
-function DialogAction({
+export function DialogAction({
   label,
   onPress,
   tone = 'muted',

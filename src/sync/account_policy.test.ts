@@ -8,6 +8,7 @@ import {
   normaliseCode,
   normaliseEmail,
   parseStoredAccount,
+  parseStoredPending,
   parseStoredSession,
   passphraseProblem,
   passphraseStrength,
@@ -216,6 +217,81 @@ describe('stored session', () => {
 
   it('counts a missing session as not live', () => {
     expect(sessionIsLive(null, 0)).toBe(false);
+  });
+});
+
+describe('stored challenge', () => {
+  const NOW = 1_700_000_000;
+
+  const challenge = {
+    challengeId: 'challenge-1',
+    email: 'ada@example.com',
+    purpose: 'register' as const,
+    codeExpiresAt: NOW + 15 * 60,
+    expiresAt: NOW + 30 * 60,
+  };
+
+  const authKdf = { algorithm: 'argon2id', memory_kib: 8192, iterations: 1, parallelism: 1 };
+
+  const stored = (record: unknown) => JSON.stringify(record);
+
+  it('reads back a registration that was interrupted', () => {
+    const record = { purpose: 'register', challenge, passphrase: 'correct horse battery staple' };
+    expect(parseStoredPending(stored(record), NOW)).toEqual(record);
+  });
+
+  it('reads back a sign-in with the auth key it had already derived', () => {
+    const record = {
+      purpose: 'login',
+      challenge: { ...challenge, purpose: 'login' },
+      passphrase: 'correct horse battery staple',
+      authKey: 'YWJj',
+      authKdf,
+    };
+    expect(parseStoredPending(stored(record), NOW)).toEqual(record);
+  });
+
+  it('refuses a challenge the server has already forgotten', () => {
+    const record = { purpose: 'register', challenge, passphrase: 'a passphrase' };
+    expect(parseStoredPending(stored(record), challenge.expiresAt - 1)).not.toBeNull();
+    expect(parseStoredPending(stored(record), challenge.expiresAt)).toBeNull();
+  });
+
+  it('refuses a sign-in with no way to re-wrap afterwards', () => {
+    const login = { ...challenge, purpose: 'login' };
+    const passphrase = 'a passphrase';
+    expect(parseStoredPending(stored({ challenge: login, passphrase, authKdf }), NOW)).toBeNull();
+    expect(
+      parseStoredPending(stored({ challenge: login, passphrase, authKey: 'YWJj' }), NOW),
+    ).toBeNull();
+    expect(
+      parseStoredPending(
+        stored({ challenge: login, passphrase, authKey: 'YWJj', authKdf: { algorithm: 'argon2id' } }),
+        NOW,
+      ),
+    ).toBeNull();
+  });
+
+  it.each([
+    ['there is nothing stored', null],
+    ['the record is not JSON', '{'],
+    ['the passphrase is missing', stored({ challenge })],
+    ['the passphrase is empty', stored({ challenge, passphrase: '' })],
+    ['there is no challenge', stored({ passphrase: 'a passphrase' })],
+    [
+      'the challenge has no id',
+      stored({ challenge: { ...challenge, challengeId: '' }, passphrase: 'a passphrase' }),
+    ],
+    [
+      'the purpose is not one of ours',
+      stored({ challenge: { ...challenge, purpose: 'reset' }, passphrase: 'a passphrase' }),
+    ],
+    [
+      'a deadline is missing',
+      stored({ challenge: { ...challenge, expiresAt: undefined }, passphrase: 'a passphrase' }),
+    ],
+  ])('has nothing to restore when %s', (_label, raw) => {
+    expect(parseStoredPending(raw, NOW)).toBeNull();
   });
 });
 

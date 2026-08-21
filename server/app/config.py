@@ -103,13 +103,27 @@ class Settings:
     max_codes_per_email: int
     max_codes_per_ip: int
     code_window_seconds: int
-    smtp_host: str
-    smtp_port: int
-    smtp_username: str
-    smtp_password: str
-    """One of "starttls", "ssl", "none"."""
-    smtp_security: str
-    """Envelope sender. May be a bare address or a "Name <addr>" pair."""
+    """
+    Gmail API over HTTPS rather than SMTP. The droplet's provider blocks outbound
+    25, 465 and 587 — every SMTP port, to every host — while leaving 443 open, so
+    a code sent over SMTP from production times out and the sign-up returns 502.
+    These three are an OAuth client and one long-lived grant on the sending
+    mailbox: the client id and secret identify the app to Google, and the refresh
+    token is what makes it that particular mailbox. See "The sending account" in
+    README.md for where they come from.
+
+    The refresh token is the secret of the three, and like the app password it
+    replaced it opens a mailbox rather than a vault — there is still no key here
+    that can decrypt anything a user stored.
+    """
+    google_client_id: str
+    google_client_secret: str
+    google_refresh_token: str
+    """
+    Envelope sender. May be a bare address or a "Name <addr>" pair. Gmail rewrites
+    it to the authenticated mailbox unless it is a verified "Send mail as" alias,
+    exactly as it did over SMTP.
+    """
     email_from: str
     """Off in production: a public /docs on an auth service is an invitation to poke at it."""
     enable_docs: bool
@@ -137,16 +151,6 @@ def _int_env(name: str, default: int) -> int:
         raise ValueError(f"{name} must be an integer, got {raw!r}") from err
 
 
-SMTP_SECURITIES = ("starttls", "ssl", "none")
-
-
-def _smtp_security() -> str:
-    value = os.environ.get("SMTP_SECURITY", "starttls").strip().lower() or "starttls"
-    if value not in SMTP_SECURITIES:
-        raise ValueError(f"SMTP_SECURITY must be one of {SMTP_SECURITIES}, got {value!r}")
-    return value
-
-
 def _database_url() -> str:
     url = os.environ.get(DATABASE_URL_ENV, "").strip()
     if not url:
@@ -170,17 +174,15 @@ def load_settings() -> Settings:
         login_attempt_window_seconds=_int_env("LOGIN_ATTEMPT_WINDOW_SECONDS", 15 * 60),
         max_registrations_per_ip=_int_env("MAX_REGISTRATIONS_PER_IP", 5),
         registration_window_seconds=_int_env("REGISTRATION_WINDOW_SECONDS", 60 * 60),
-        code_ttl_seconds=_int_env("CODE_TTL_SECONDS", 5 * 60),
+        code_ttl_seconds=_int_env("CODE_TTL_SECONDS", 15 * 60),
         challenge_ttl_seconds=_int_env("CHALLENGE_TTL_SECONDS", 30 * 60),
         max_code_attempts=_int_env("MAX_CODE_ATTEMPTS", 5),
         max_codes_per_email=_int_env("MAX_CODES_PER_EMAIL", 5),
         max_codes_per_ip=_int_env("MAX_CODES_PER_IP", 20),
         code_window_seconds=_int_env("CODE_WINDOW_SECONDS", 15 * 60),
-        smtp_host=os.environ.get("SMTP_HOST", "").strip(),
-        smtp_port=_int_env("SMTP_PORT", 587),
-        smtp_username=os.environ.get("SMTP_USERNAME", "").strip(),
-        smtp_password=os.environ.get("SMTP_PASSWORD", ""),
-        smtp_security=_smtp_security(),
+        google_client_id=os.environ.get("GOOGLE_CLIENT_ID", "").strip(),
+        google_client_secret=os.environ.get("GOOGLE_CLIENT_SECRET", "").strip(),
+        google_refresh_token=os.environ.get("GOOGLE_REFRESH_TOKEN", "").strip(),
         email_from=os.environ.get(
             "EMAIL_FROM", "Authenticator <no-reply@authenticator.moates.com.au>"
         ).strip(),

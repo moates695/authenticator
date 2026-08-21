@@ -14,6 +14,7 @@ import * as SecureStore from 'expo-secure-store';
 import { emptyVault, type Vault } from '@/vault/types';
 import {
   decryptVault,
+  destroyVault,
   installDataKey,
   peekDataKey,
   readVault,
@@ -29,12 +30,14 @@ import {
   normaliseCode,
   normaliseEmail,
   parseStoredAccount,
+  parseStoredPending,
   parseStoredSession,
   refreshDue,
   sessionIsLive,
   type AccountState,
   type PendingVerification,
   type StoredAccount,
+  type StoredPending,
   type StoredSession,
 } from './account_policy';
 import * as api from './api';
@@ -56,6 +59,7 @@ import { peekable, type Peekable } from './peekable';
 
 const ACCOUNT_KEY = 'sync_account';
 const SESSION_KEY = 'sync_session';
+const PENDING_KEY = 'sync_pending';
 
 const KEYSTORE_OPTIONS: SecureStore.SecureStoreOptions = {
   keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
@@ -89,8 +93,8 @@ type RegistrationMaterial = {
 };
 
 /**
- * What a challenge carries besides its id, kept in memory for as long as the
- * code is outstanding and never written anywhere.
+ * What a challenge carries besides its id, held for as long as the code is
+ * outstanding and gone the moment it stops being.
  *
  * The two purposes hold different things because their derivations happen at
  * opposite ends of the code. A registration has already started its keys — the
@@ -99,8 +103,10 @@ type RegistrationMaterial = {
  * light auth key and holds the passphrase itself, because the encryption key is
  * not derived until the code comes back right.
  *
- * That none of it survives a restart is the point: a killed app leaves nothing
- * half-authenticated behind, and starting again costs a passphrase.
+ * Both halves hold the passphrase, and it is the only part of this mirrored to
+ * the keystore — see `StoredPending` — so an app killed while the user was in
+ * their inbox comes back to the code screen rather than losing the code it just
+ * sent them. Everything else is rebuilt on the way back rather than stored.
  */
 type PendingKeys =
   | {
@@ -116,7 +122,13 @@ type PendingKeys =
       /** The account's own auth parameters, which a re-wrap must not change. */
       authKdf: KdfParams;
     }
-  | { purpose: 'register'; email: string; material: Peekable<RegistrationMaterial> };
+  | {
+      purpose: 'register';
+      email: string;
+      /** Kept for the restore, which has to start the derivation below again. */
+      passphrase: string;
+      material: Peekable<RegistrationMaterial>;
+    };
 
 type LoginKeys = Extract<PendingKeys, { purpose: 'login' }>;
 
@@ -192,6 +204,14 @@ type AccountContextValue = {
    */
   refreshSession: () => Promise<void>;
   signOut: () => Promise<void>;
+  /**
+   * Erases the account: the row on the server, the backup under it, and the
+   * copy on this device. Takes the passphrase because the server does — a
+   * session alone is not enough to destroy a backup.
+   *
+   * Returns whether it went through; `error` says why when it did not.
+   */
+  deleteAccount: (passphrase: string) => Promise<boolean>;
   clearError: () => void;
 };
 
@@ -213,6 +233,20 @@ function toPending(challenge: api.ChallengeResponse): PendingVerification {
     purpose: challenge.purpose,
     codeExpiresAt: challenge.code_expires_at,
     expiresAt: challenge.expires_at,
+  };
+}
+
+/** The half of a challenge that is worth keeping across a restart. */
+function toStoredPending(challenge: PendingVerification, keys: PendingKeys): StoredPending {
+  if (keys.purpose === 'register') {
+    return { purpose: 'register', challenge, passphrase: keys.passphrase };
+  }
+  return {
+    purpose: 'login',
+    challenge,
+    passphrase: keys.passphrase,
+    authKey: bytesToBase64(keys.authKey),
+    authKdf: keys.authKdf,
   };
 }
 
@@ -312,11 +346,23 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     setState('signed_out');
   }, []);
 
-  const beginVerification = useCallback((challenge: api.ChallengeResponse, keys: PendingKeys) => {
-    const next = toPending(challenge);
-    pending.current = { challenge: next, keys };
-    setPendingVerification(next);
-  }, []);
+  const beginVerification = useCallback(
+    async (challenge: api.ChallengeResponse, keys: PendingKeys) => {
+      const next = toPending(challenge);
+      pending.current = { challenge: next, keys };
+      setPendingVerification(next);
+
+      // Best effort, and awaited only for the ordering: the challenge is live
+      // whatever the keystore says, and a write that failed costs a restart
+      // rather than the sign-in in front of the user.
+      await SecureStore.setItemAsync(
+        PENDING_KEY,
+        JSON.stringify(toStoredPending(next, keys)),
+        KEYSTORE_OPTIONS,
+      ).catch(() => {});
+    },
+    [],
+  );
 
   const endVerification = useCallback(() => {
     pending.current = null;
@@ -326,6 +372,9 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     // than starting a second Argon2id pass alongside it.
     if (derivation.current?.settled) derivation.current = null;
     setPendingVerification(null);
+    // The passphrase kept for the restore has nothing left to finish, and this
+    // is the only thing that takes it back off the device.
+    void SecureStore.deleteItemAsync(PENDING_KEY).catch(() => {});
   }, []);
 
   const cancelVerification = useCallback(() => {
@@ -415,6 +464,43 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     [derive],
   );
 
+  /**
+   * Puts a challenge that outlived the process back on screen.
+   *
+   * The code is still in the user's inbox and the server is still holding the
+   * challenge, so nothing has to be asked for again — which is the whole point:
+   * dropping them at the gate would strand a live code and cost another one.
+   *
+   * A registration's key material does not come back with it. It is seconds of
+   * scrypt around a freshly minted data key, and neither belongs in storage, so
+   * the derivation simply starts again here exactly as it did when the code
+   * first went out. By the time six digits are typed it is usually done.
+   */
+  const restorePending = useCallback(
+    (stored: StoredPending) => {
+      const { challenge, passphrase } = stored;
+      const keys: PendingKeys =
+        stored.purpose === 'login'
+          ? {
+              purpose: 'login',
+              email: challenge.email,
+              passphrase,
+              authKey: base64ToBytes(stored.authKey),
+              authKdf: stored.authKdf,
+            }
+          : {
+              purpose: 'register',
+              email: challenge.email,
+              passphrase,
+              material: peekable(prepareRegistration(challenge.email, passphrase)),
+            };
+
+      pending.current = { challenge, keys };
+      setPendingVerification(challenge);
+    },
+    [prepareRegistration],
+  );
+
   const register = useCallback(
     async (rawEmail: string, passphrase: string): Promise<boolean> => {
       if (inFlight.current) return false;
@@ -438,9 +524,10 @@ export function AccountProvider({ children }: { children: ReactNode }) {
         // Nothing exists anywhere yet: no account on the server, nothing on
         // the device. The keys take shape here in memory while the code is in
         // transit, and wait with the challenge.
-        beginVerification(challenge, {
+        await beginVerification(challenge, {
           purpose: 'register',
           email,
+          passphrase,
           material: peekable(prepareRegistration(email, passphrase)),
         });
         return true;
@@ -486,7 +573,13 @@ export function AccountProvider({ children }: { children: ReactNode }) {
         // the vault has not been derived yet and cannot be until the code comes
         // back. It lives in memory for as long as the code is outstanding, and
         // goes when the challenge does.
-        beginVerification(challenge, { purpose: 'login', email, passphrase, authKey, authKdf });
+        await beginVerification(challenge, {
+          purpose: 'login',
+          email,
+          passphrase,
+          authKey,
+          authKdf,
+        });
         return { ok: true };
       } catch (err) {
         setError(describe(err));
@@ -795,7 +888,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       // A new challenge id comes back with it; the previous code is dead from
       // the moment the server issues this one.
       const challenge = await api.resendCode(current.challenge.challengeId);
-      beginVerification(challenge, current.keys);
+      await beginVerification(challenge, current.keys);
       return true;
     } catch (err) {
       setError(describe(err));
@@ -876,22 +969,96 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     setState('signed_out');
   }, [endVerification]);
 
+  /**
+   * Closes the account for good. There is no undo and nothing to restore from:
+   * deleting the user row takes the encrypted backup with it, and the copy here
+   * goes too, along with the data key that opens it.
+   *
+   * Wiping the device as well as the server is the honest reading of what was
+   * asked for. Codes left behind would be a vault no account can ever back up
+   * again, and the next sign-in would offer to upload them to somebody else's.
+   *
+   * The passphrase is required because the server requires it. A session is
+   * proof that this device was let in at some point, which is too weak a thing
+   * to hang an irreversible delete on; the auth key is proof of the passphrase,
+   * derived under the account's own parameters, and that is what is checked.
+   */
+  const deleteAccount = useCallback(
+    async (passphrase: string): Promise<boolean> => {
+      if (inFlight.current) return false;
+
+      const token = session.current?.token;
+      const email = account?.email;
+      if (!token || !email) {
+        setError('You are not signed in.');
+        return false;
+      }
+
+      inFlight.current = true;
+      setBusy(true);
+      setError(null);
+      try {
+        // The account's own auth parameters, which may be older than our
+        // defaults — the same reason `signIn` asks before deriving.
+        const { authKdf } = await api.prelogin(email);
+        const authKey = await deriveAuthKey(passphrase, email, authKdf);
+        await api.deleteAccount(token, authKey);
+      } catch (err) {
+        // A wrong passphrase arrives as the server's own 401 message. Nothing
+        // has been touched, here or there, so the account is exactly as it was.
+        setError(describe(err));
+        return false;
+      } finally {
+        inFlight.current = false;
+        setBusy(false);
+      }
+
+      // Only past the server's confirmation, and best effort from here: the
+      // account is gone whatever the local files do, so a failed delete must
+      // not leave the app claiming to still be signed in to it.
+      await destroyVault().catch(() => {});
+      await Promise.all([
+        SecureStore.deleteItemAsync(ACCOUNT_KEY).catch(() => {}),
+        SecureStore.deleteItemAsync(SESSION_KEY).catch(() => {}),
+      ]);
+
+      session.current = null;
+      endVerification();
+      setAccount(null);
+      setPendingRecoveryKey(null);
+      setError(null);
+      // Not even the address is kept. There is no account left to sign back in
+      // to, so offering it on the way out would only invite a puzzled retry.
+      setLastEmail(null);
+      setSessionExpired(false);
+      setState('signed_out');
+      return true;
+    },
+    [account, endVerification],
+  );
+
   // Restore what is stored, then fall back to the development auto sign-in.
   useEffect(() => {
     let active = true;
 
     void (async () => {
-      const [storedAccount, storedSession] = await Promise.all([
+      const [storedAccount, storedSession, storedPending] = await Promise.all([
         SecureStore.getItemAsync(ACCOUNT_KEY)
           .then(parseStoredAccount)
           .catch(() => null),
         SecureStore.getItemAsync(SESSION_KEY)
           .then(parseStoredSession)
           .catch(() => null),
+        SecureStore.getItemAsync(PENDING_KEY)
+          .then((raw) => parseStoredPending(raw, nowSeconds()))
+          .catch(() => null),
       ]);
       if (!active) return;
 
       if (storedAccount && sessionIsLive(storedSession, nowSeconds())) {
+        // Whatever challenge was outstanding belongs to a run that ended after
+        // this device was already enrolled. There is nothing left to answer.
+        void SecureStore.deleteItemAsync(PENDING_KEY).catch(() => {});
         session.current = storedSession;
         setLastEmail(storedAccount.email);
         setAccount(storedAccount);
@@ -906,6 +1073,15 @@ export function AccountProvider({ children }: { children: ReactNode }) {
         session.current = null;
         setLastEmail(storedAccount.email);
         setSessionExpired(true);
+      }
+
+      // A code sitting in somebody's inbox outranks both the gate and the
+      // development sign-in below. The address has already been mailed, and
+      // the way on from here is the six digits rather than starting again.
+      if (storedPending) {
+        restorePending(storedPending);
+        setState('signed_out');
+        return;
       }
 
       const automatic = devAutoLogin(
@@ -961,6 +1137,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       confirmReplaceLocal,
       refreshSession,
       signOut,
+      deleteAccount,
       clearError: () => setError(null),
     }),
     [
@@ -982,6 +1159,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       confirmReplaceLocal,
       refreshSession,
       signOut,
+      deleteAccount,
     ],
   );
 

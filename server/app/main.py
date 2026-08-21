@@ -509,8 +509,27 @@ def create_app(settings: Settings | None = None, mailer: mail.Mailer | None = No
 
         prune(db, now)
 
+        # Asking again for an address that is already mid-registration is that
+        # same registration restarted, not another one. It is the ordinary way
+        # out of a code that never came back — the app was killed while its
+        # owner was in their inbox — and no account can come of it that the
+        # first attempt would not have made, so the cap on new accounts from one
+        # address does not apply to it. `prune` above means any row still here
+        # is live; what bounds the mail is the per-email code throttle, which
+        # applies either way.
+        resuming = (
+            db.execute(
+                "SELECT 1 FROM pending_registrations WHERE email = %s", (email,)
+            ).fetchone()
+            is not None
+        )
+
         window_start = now - settings.registration_window_seconds
-        if count_events(db, REGISTRATION, ip, window_start) >= settings.max_registrations_per_ip:
+        if (
+            not resuming
+            and count_events(db, REGISTRATION, ip, window_start)
+            >= settings.max_registrations_per_ip
+        ):
             raise HTTPException(
                 status.HTTP_429_TOO_MANY_REQUESTS,
                 "Too many accounts created from this address. Try again later.",
@@ -738,7 +757,7 @@ def create_app(settings: Settings | None = None, mailer: mail.Mailer | None = No
     @app.post(f"{API_PREFIX}/verify/resend", response_model=ChallengeResponse)
     def resend(body: ResendRequest, request: Request, db: Db) -> ChallengeResponse:
         """
-        A fresh code for a challenge already in hand, so a five minute expiry
+        A fresh code for a challenge already in hand, so the code expiry
         does not cost the user another passphrase and another Argon2id run. The
         new code replaces the old one, which stops working immediately.
         """

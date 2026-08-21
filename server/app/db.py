@@ -67,7 +67,7 @@ CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expires_at);
 -- whatever was outstanding, and verifying deletes the row, so a code works once
 -- and only the newest one works at all.
 --
--- The code and the challenge expire separately. `code_expires_at` is the five
+-- The code and the challenge expire separately. `code_expires_at` is the fifteen
 -- minutes the digits are good for; `expires_at` is how long the client may keep
 -- asking for a fresh one before it has to start from the passphrase again.
 CREATE TABLE IF NOT EXISTS email_challenges (

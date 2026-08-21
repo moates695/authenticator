@@ -1,7 +1,7 @@
 #!/usr/bin/env python3.12
 """
-Sends one real verification email, to check SMTP credentials without standing a
-server up.
+Sends one real verification email, to check the Gmail credentials without
+standing a server up.
 
     uv run python deploy/send_test_email.py
     uv run python deploy/send_test_email.py --to someone@example.com
@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import deploy.env_file as env_file  # noqa: E402
 from app.config import load_settings  # noqa: E402
-from app.mail import SendFailed, SmtpMailer, verification_message  # noqa: E402
+from app.mail import GmailApiMailer, SendFailed, verification_message  # noqa: E402
 
 # Not a code anyone could use. It never reaches the database, and the point is
 # to see the shape of the message rather than to complete a sign-in.
@@ -49,7 +49,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--to",
-        help="Recipient. Defaults to SMTP_USERNAME, so the account mails itself.",
+        help="Recipient. Defaults to the EMAIL_FROM address, so the account mails itself.",
     )
     parser.add_argument(
         "--purpose",
@@ -62,21 +62,29 @@ def main() -> int:
     apply_env()
     settings = load_settings()
 
-    if not settings.smtp_host:
-        print("SMTP_HOST is not set. Fill in server/.env first.", file=sys.stderr)
-        return 1
-    if not settings.smtp_username:
-        print("SMTP_USERNAME is not set. Gmail will not accept an anonymous send.", file=sys.stderr)
-        return 1
-    if not settings.smtp_password:
+    missing = [
+        name
+        for name, value in (
+            ("GOOGLE_CLIENT_ID", settings.google_client_id),
+            ("GOOGLE_CLIENT_SECRET", settings.google_client_secret),
+            ("GOOGLE_REFRESH_TOKEN", settings.google_refresh_token),
+        )
+        if not value
+    ]
+    if missing:
         print(
-            "SMTP_PASSWORD is not set. Gmail needs the 16-character app password"
-            " from myaccount.google.com/apppasswords, not the account password.",
+            f"{', '.join(missing)} not set. Fill in the email block in server/.env"
+            " — the refresh token comes from deploy/google_oauth_token.py.",
             file=sys.stderr,
         )
         return 1
 
-    recipient = args.to or settings.smtp_username
+    # The From header is the only address configured now, so it is also the only
+    # sensible default recipient: the account mails itself.
+    recipient = args.to or _address(settings.email_from)
+    if not recipient:
+        print("No --to, and EMAIL_FROM has no address in it.", file=sys.stderr)
+        return 1
 
     message = verification_message(
         recipient,
@@ -85,8 +93,7 @@ def main() -> int:
         settings.code_ttl_seconds,
     )
 
-    print(f"Sending via {settings.smtp_host}:{settings.smtp_port} ({settings.smtp_security})")
-    print(f"  as   {settings.smtp_username}")
+    print("Sending via the Gmail API (HTTPS, no SMTP port involved)")
     print(f"  from {settings.email_from}")
     print(f"  to   {recipient}")
     # Piped output is block-buffered while stderr is not, so without this a
@@ -94,26 +101,33 @@ def main() -> int:
     sys.stdout.flush()
 
     try:
-        SmtpMailer(settings).send(message)
+        GmailApiMailer(settings).send(message)
     except SendFailed as err:
         print(f"\nFailed: {err}", file=sys.stderr)
         # The two that actually happen, and neither error text says which.
         print(
-            "\n535 means the app password was rejected — check it is the app"
-            " password with its spaces stripped, and that 2-Step Verification is"
-            " still on. A timeout usually means port 587 is blocked outbound.",
+            "\n'invalid_grant' on the refresh token means it has expired or been"
+            " revoked — the usual cause is an OAuth consent screen still in"
+            " Testing, which expires tokens after seven days. A 403 on the send"
+            " means the Gmail API is not enabled on the project.",
             file=sys.stderr,
         )
         return 1
 
     print("\nSent. Check the inbox, and check spam — where it lands is half the test.")
-    if settings.email_from and settings.smtp_username not in settings.email_from:
-        print(
-            "\nNote: EMAIL_FROM does not contain SMTP_USERNAME. Unless that address"
-            " is a verified 'Send mail as' alias, Gmail will have rewritten the"
-            " From header to the account address — compare what arrived.",
-        )
+    print(
+        "\nCheck the From header on what arrived. Gmail rewrites it to the mailbox"
+        " the refresh token belongs to unless EMAIL_FROM is a verified"
+        " 'Send mail as' alias of it.",
+    )
     return 0
+
+
+def _address(email_from: str) -> str:
+    """Pulls the bare address out of a "Name <addr>" pair, or passes one through."""
+    if "<" in email_from and ">" in email_from:
+        return email_from.split("<", 1)[1].split(">", 1)[0].strip()
+    return email_from.strip()
 
 
 if __name__ == "__main__":

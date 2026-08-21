@@ -8,12 +8,14 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "pydantic[email]>=2.9",
     "psycopg[binary,pool]>=3.2",
+    # Runtime, not just tests: verification codes go out over the Gmail API,
+    # because the droplet's provider blocks every outbound SMTP port. See mail.py.
+    "httpx>=0.27",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8.3",
-    "httpx>=0.27",
 ]
 
 [tool.pytest.ini_options]

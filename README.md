@@ -169,16 +169,20 @@ but that is the light derivation, so the code goes out almost immediately. The
 slow one runs after `/v1/verify` accepts the code, which is why a mistyped code
 costs a retry rather than a wait.
 
-A code works once and lives five minutes. Issuing one destroys whatever was
+A code works once and lives fifteen minutes. Issuing one destroys whatever was
 outstanding for that account, so there is never more than one live code for an
 address; verifying deletes it; five wrong guesses destroy the challenge. The
 challenge behind the code outlives it by design — half an hour — so a code that
 expires while the user is looking for it costs a tap on "send another" rather
 than another passphrase and another several seconds of Argon2id.
 
-`sync/verify_email_screen.tsx` is that step. The keys derived on the way to it
-are held in memory only: killing the app mid-verification leaves nothing
-half-authenticated behind, at the cost of retyping the passphrase.
+`sync/verify_email_screen.tsx` is that step, and it survives the app being
+killed while its owner is in their inbox — which is how most sign-ups are
+interrupted. The challenge and the passphrase go to the keystore beside the
+vault's data key, so coming back lands on the code screen with the code that was
+already sent still good; everything else is derived again rather than stored.
+That record is written when the code goes out and deleted the moment the
+challenge ends, whether it was answered, backed out of, or simply outlived.
 
 One address is exempt from the email, so that app testers can get in without an
 inbox: the server's `TEST_ACCOUNT_EMAIL` names a single account that is always
@@ -332,8 +336,8 @@ npm run typecheck    # tsc --noEmit
 `authenticator` database on the PostgreSQL 17 installed on Windows — found at run
 time, since WSL2 reaches the Windows host by an address that changes when WSL
 restarts. Verification codes are emailed here exactly as they are in production,
-so it needs the SMTP credentials in `server/.env` and will not start without
-them. It wants its own terminal alongside `npm start`, and the one-time role and
+so it needs the Gmail API credentials in `server/.env` and will not start
+without them. It wants its own terminal alongside `npm start`, and the one-time role and
 database setup in `server/README.md`. `uv run` syncs the environment from the
 lockfile itself, so there is no install step.
 

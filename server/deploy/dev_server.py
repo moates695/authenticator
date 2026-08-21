@@ -12,7 +12,7 @@ same two helpers rather than on a command line nobody reads.
 Anything already exported wins, so a one-off run against other settings needs no
 edit:
 
-    SMTP_USERNAME=other@gmail.com uv run python deploy/dev_server.py
+    EMAIL_FROM=other@gmail.com uv run python deploy/dev_server.py
 """
 
 from __future__ import annotations
@@ -60,17 +60,22 @@ def main() -> int:
     # Development only. A public API explorer on an auth service is an invitation.
     os.environ.setdefault("ENABLE_DOCS", "1")
 
-    if not os.environ.get("SMTP_HOST"):
+    missing = [
+        name
+        for name in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN")
+        if not os.environ.get(name)
+    ]
+    if missing:
         print(
-            "No SMTP_HOST. Codes are no longer printed to the log, so sign-in"
-            " will fail at the first send. Fill in the email block in"
+            f"No {', '.join(missing)}. Codes are no longer printed to the log, so"
+            " sign-in will fail at the first send. Fill in the email block in"
             " server/.env — see 'The sending account' in server/README.md.",
             file=sys.stderr,
         )
         return 1
 
     print(f"Database  {os.environ['DATABASE_URL']}")
-    print(f"Mail      {os.environ.get('SMTP_USERNAME')} via {os.environ['SMTP_HOST']}")
+    print(f"Mail      {os.environ.get('EMAIL_FROM')} via the Gmail API")
     print("Codes are sent by email — there is no console fallback.\n")
     sys.stdout.flush()
 
